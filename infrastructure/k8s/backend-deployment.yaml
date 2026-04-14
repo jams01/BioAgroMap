@@ -1,0 +1,30 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bioagromap-backend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: bioagromap-backend
+  template:
+    metadata:
+      labels:
+        app: bioagromap-backend
+    spec:
+      containers:
+        - name: backend
+          image: your-registry/bioagromap-backend:latest
+          ports:
+            - containerPort: 8000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: bioagromap-backend
+spec:
+  selector:
+    app: bioagromap-backend
+  ports:
+    - port: 80
+      targetPort: 8000

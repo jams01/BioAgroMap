@@ -1,0 +1,91 @@
+services:
+  postgres:
+    image: postgis/postgis:14-3.4
+    environment:
+      POSTGRES_DB: bioagromap
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infrastructure/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+
+  backend:
+    image: python:3.11-slim
+    working_dir: /app
+    volumes:
+      - ./backend:/app
+      - ./data:/data
+    command: bash -lc "apt-get update && apt-get install -y libexpat1 && pip install -r requirements.txt && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    environment:
+      DATABASE_URL: postgresql+psycopg2://postgres:postgres@postgres:5432/bioagromap
+      REDIS_URL: redis://redis:6379/0
+      STORAGE_PATH: /data/storage
+      SECRET_KEY: super-secret-dev-key
+    ports:
+      - "8000:8000"
+    depends_on:
+      - postgres
+      - redis
+
+  worker:
+    image: python:3.11-slim
+    working_dir: /app
+    volumes:
+      - ./backend:/app
+      - ./data:/data
+    command: bash -lc "apt-get update && apt-get install -y libexpat1 && pip install -r requirements.txt && celery -A app.tasks.celery_app.celery_app worker --loglevel=info"
+    environment:
+      DATABASE_URL: postgresql+psycopg2://postgres:postgres@postgres:5432/bioagromap
+      REDIS_URL: redis://redis:6379/0
+      STORAGE_PATH: /data/storage
+    depends_on:
+      - redis
+      - postgres
+
+  ai_service:
+    image: python:3.11-slim
+    working_dir: /app
+    volumes:
+      - ./ai_service:/app
+      - ./data:/data
+    command: bash -lc "apt-get update && apt-get install -y libexpat1 && pip install -r requirements.txt && uvicorn app.main:app --host 0.0.0.0 --port 8001"
+    ports:
+      - "8001:8001"
+
+  frontend:
+    image: node:20
+    working_dir: /app
+    volumes:
+      - ./frontend:/app
+    command: bash -lc "npm install && npm run dev"
+    environment:
+      VITE_API_URL: http://localhost:8000/api/v1
+      VITE_MAPBOX_TOKEN: ${VITE_MAPBOX_TOKEN:-}
+    ports:
+      - "5173:5173"
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./infrastructure/prometheus.yml:/etc/prometheus/prometheus.yml
+    depends_on:
+      - backend
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+
+volumes:
+  postgres_data:
