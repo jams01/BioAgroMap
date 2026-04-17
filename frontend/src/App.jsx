@@ -1,10 +1,28 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
-import api, { setAuthToken } from "./api";
+import api, {
+  clearAuthTokens,
+  formatApiErrorDetail,
+  loadStoredAuth,
+  persistAuthTokens,
+  setAuthToken,
+} from "./api";
 import useMapLayers from "./hooks/useMapLayers";
-import { kmlToGeojson, kmzToGeojson, bboxFromGeojson } from "./utils/geo";
+import {
+  kmlToGeojson,
+  kmzToGeojson,
+  bboxFromGeojson,
+  bboxFromBoundsWgs84,
+  formatRecorteDisplayName,
+} from "./utils/geo";
 import Sidebar from "./components/Sidebar";
 import MapView from "./components/MapView";
+
+/** Sentinel-2 ZIP antiguo: una capa por banda (B02…B08). Ocultar; solo vistas RGB/NIR. */
+function isLegacyS2ZipBandRaster(meta) {
+  if (!meta) return false;
+  return !!(meta.s2_band_pack && meta.band && !meta.composite_kind);
+}
 
 export default function App() {
   const navigate = useNavigate();
@@ -22,14 +40,49 @@ export default function App() {
   const [loteFile, setLoteFile] = useState(null);
   const [rasterFile, setRasterFile] = useState(null);
   const [downloadSource, setDownloadSource] = useState("sentinel-1");
-  const [indiceType, setIndiceType] = useState("NDVI");
+  const [selectedIndices, setSelectedIndices] = useState([]);
   const [stackMode, setStackMode] = useState("visualizar");
   const [targetRasterId, setTargetRasterId] = useState("");
   const [s2Download, setS2Download] = useState(null);
+  const [recorteTaskId, setRecorteTaskId] = useState("");
+  const [indexStacksTaskId, setIndexStacksTaskId] = useState("");
+  const [clusterElbowLoading, setClusterElbowLoading] = useState(false);
+  const [clusterGmmLoading, setClusterGmmLoading] = useState(false);
+  const [clusterElbowResults, setClusterElbowResults] = useState(null);
+  const [clusterGmmResults, setClusterGmmResults] = useState(null);
 
   useEffect(() => {
     setS2Download(null);
+    setClusterElbowResults(null);
+    setClusterGmmResults(null);
   }, [projectId]);
+
+  useEffect(() => {
+    const { access, refresh } = loadStoredAuth();
+    if (access && refresh) {
+      setToken(access);
+      persistAuthTokens(access, refresh);
+    }
+  }, []);
+
+  useEffect(() => {
+    const onRefreshed = (e) => {
+      if (e.detail?.access_token) setToken(e.detail.access_token);
+    };
+    const onExpired = () => {
+      setToken("");
+      setProjectId("");
+      setProjects([]);
+      setTargetRasterId("");
+      setMessage("Sesion expirada. Vuelve a iniciar sesion.");
+    };
+    window.addEventListener("bioagromap:auth-refreshed", onRefreshed);
+    window.addEventListener("bioagromap:auth-expired", onExpired);
+    return () => {
+      window.removeEventListener("bioagromap:auth-refreshed", onRefreshed);
+      window.removeEventListener("bioagromap:auth-expired", onExpired);
+    };
+  }, []);
 
   useEffect(() => {
     if (!s2Download || s2Download.ui_status !== "downloading" || !projectId || !token) {
@@ -48,6 +101,8 @@ export default function App() {
             progress: r.data.progress ?? prev.progress,
             message: r.data.message ?? prev.message,
             ui_status: st,
+            totalDownloaded: r.data.total_downloaded ?? prev.totalDownloaded,
+            totalSizeMb: r.data.total_size_mb ?? prev.totalSizeMb,
           };
         });
         if (st === "completed") {
@@ -65,6 +120,85 @@ export default function App() {
     const iv = setInterval(poll, 2000);
     return () => clearInterval(iv);
   }, [s2Download?.rasterId, s2Download?.ui_status, projectId, token]);
+
+  useEffect(() => {
+    if (!recorteTaskId || !token || !projectId) {
+      return undefined;
+    }
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        setAuthToken(token);
+        const r = await api.get(`/preprocess/task-status/${recorteTaskId}`);
+        if (cancelled) return;
+        if (r.data.ready && r.data.state === "SUCCESS") {
+          const result = r.data.result || {};
+          const n = result.processed ?? 0;
+          const errs = (result.errors || []).filter(Boolean);
+          const errTxt = errs.length ? ` Detalle: ${errs.join("; ")}` : "";
+          setRecorteTaskId("");
+          setMessage(
+            n > 0
+              ? `Recortes L2A: ${n} GeoTIFF de 6 bandas (B02,B03,B04,B05,B08,B11; B5/B11 a 10 m) añadido(s) como capa(s).${errTxt}`
+              : `Pipeline terminado sin nuevas capas.${errTxt || " Comprueba inventario L2A y polígono."}`
+          );
+          await selectProject(projectId, token);
+        } else if (r.data.ready && r.data.state === "FAILURE") {
+          setRecorteTaskId("");
+          setMessage(`Error en pipeline L2A: ${r.data.error || "fallo"}`);
+        }
+      } catch (_) {
+        /* ignorar errores transitorios al consultar Celery */
+      }
+    };
+    poll();
+    const iv = setInterval(poll, 2500);
+    return () => {
+      cancelled = true;
+      clearInterval(iv);
+    };
+  }, [recorteTaskId, projectId, token]);
+
+  useEffect(() => {
+    if (!indexStacksTaskId || !token || !projectId) {
+      return undefined;
+    }
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        setAuthToken(token);
+        const r = await api.get(`/preprocess/task-status/${indexStacksTaskId}`);
+        if (cancelled) return;
+        if (r.data.ready && r.data.state === "SUCCESS") {
+          const result = r.data.result || {};
+          const outs = result.outputs || {};
+          const errList = result.errors || [];
+          const parts = Object.entries(outs).map(([k, v]) => `${k}: ${v}`);
+          const errTxt =
+            errList.length > 0
+              ? ` Escenas con avisos: ${errList.length}.`
+              : "";
+          setIndexStacksTaskId("");
+          setMessage(
+            Object.keys(outs).length > 0
+              ? `Stacks de índices generados (${result.scene_count ?? "?"} escenas). ${parts.join(" | ")}${errTxt}`
+              : `${result.message || "Sin archivos de salida; comprueba recortes L2A."}${errTxt}`
+          );
+        } else if (r.data.ready && r.data.state === "FAILURE") {
+          setIndexStacksTaskId("");
+          setMessage(`Error en stacks de índices: ${r.data.error || "fallo"}`);
+        }
+      } catch (_) {
+        /* ignorar errores transitorios */
+      }
+    };
+    poll();
+    const iv = setInterval(poll, 2500);
+    return () => {
+      cancelled = true;
+      clearInterval(iv);
+    };
+  }, [indexStacksTaskId, projectId, token]);
 
   const {
     mapLayers,
@@ -133,6 +267,12 @@ export default function App() {
         if (bbox) { map.fitBounds(bbox, { padding: 60, maxZoom: 17 }); return; }
       }
     } catch (_) {}
+    if (layer.kind === "raster") {
+      setMessage(
+        "Esta capa raster no tiene extensión geográfica (CRS). Si es Sentinel-2, sube un ZIP de la carpeta .SAFE completa (no un solo JPG). También puedes usar un GeoTIFF/JP2 con CRS o volver a cargar el proyecto tras el procesamiento."
+      );
+      return;
+    }
     setMessage("No se pudo calcular la extension de esta capa.");
   }
 
@@ -190,15 +330,31 @@ export default function App() {
         if (m.source === "sentinel-2" && m.type === "download") {
           continue;
         }
-        addMapLayer(raster.name, "raster", null, raster.id);
+        if (isLegacyS2ZipBandRaster(m)) continue;
+        if (m.s2_index_stack) continue;
+        const rb = m.bounds_wgs84;
+        const rbbox = bboxFromBoundsWgs84(rb);
+        const title =
+          formatRecorteDisplayName(raster.metadata, raster.name) || raster.name;
+        addMapLayer(raster.name, "raster", null, raster.id, {
+          ...(rbbox ? { bbox: rbbox } : {}),
+          metadata: raster.metadata,
+          displayName: title,
+          append: true,
+        });
         if (raster.id) setTargetRasterId(String(raster.id));
+        if (rbbox && !firstBbox) firstBbox = rbbox;
       }
       if (firstBbox && mapRef.current) {
         mapRef.current.fitBounds(firstBbox, { padding: 60, maxZoom: 17 });
       }
-      const visibleRasters = rastersRes.data.filter(
-        (r) => !((r.metadata || {}).source === "sentinel-2" && (r.metadata || {}).type === "download")
-      );
+      const visibleRasters = rastersRes.data.filter((r) => {
+        const m = r.metadata || {};
+        if (m.source === "sentinel-2" && m.type === "download") return false;
+        if (isLegacyS2ZipBandRaster(m)) return false;
+        if (m.s2_index_stack) return false;
+        return true;
+      });
       const totalLayers = layersRes.data.length + visibleRasters.length;
       const proj = projects.find((p) => p.id === id);
       const projName = proj ? proj.name : `ID ${id}`;
@@ -280,7 +436,7 @@ export default function App() {
       });
       const accessToken = res.data.access_token;
       setToken(accessToken);
-      setAuthToken(accessToken);
+      persistAuthTokens(accessToken, res.data.refresh_token);
       const userProjects = await fetchProjects(accessToken);
       setMessage(`Cuenta creada. ${userProjects.length} proyecto(s) encontrado(s).`);
       navigate("/app");
@@ -309,7 +465,7 @@ export default function App() {
       });
       const accessToken = res.data.access_token;
       setToken(accessToken);
-      setAuthToken(accessToken);
+      persistAuthTokens(accessToken, res.data.refresh_token);
       const userProjects = await fetchProjects(accessToken);
       setMessage(`Sesion iniciada. ${userProjects.length} proyecto(s) encontrado(s).`);
       navigate("/app");
@@ -323,7 +479,7 @@ export default function App() {
 
   function logoutSession() {
     setToken("");
-    setAuthToken(null);
+    clearAuthTokens();
     setProjectId("");
     setProjects([]);
     setTargetRasterId("");
@@ -414,9 +570,30 @@ export default function App() {
       const form = new FormData();
       form.append("file", rasterFile);
       const res = await api.post(`/upload-raster?project_id=${projectId}`, form);
-      setTargetRasterId(String(res.data.raster_layer_id));
-      addMapLayer(rasterFile.name, "raster", null, res.data.raster_layer_id);
-      setMessage(`Raster cargado correctamente. Raster ID: ${res.data.raster_layer_id}`);
+      const layers = res.data.layers;
+      if (Array.isArray(layers) && layers.length > 0) {
+        layers.forEach((L) => {
+          if (mapLayersRef.current.some((x) => x.serverId === L.id)) return;
+          const rbbox = bboxFromBoundsWgs84(L.metadata?.bounds_wgs84);
+          addMapLayer(L.name, "raster", null, L.id, rbbox ? { bbox: rbbox } : {});
+        });
+        const nir = layers.find((x) => x.composite === "nir");
+        const pick = nir || layers[layers.length - 1];
+        setTargetRasterId(String(pick.id));
+        setMessage(
+          `Sentinel-2: 2 capas (${layers.map((x) => x.name).join(", ")}). TIF 4 bandas B04-B03-B02-B08 guardado en el proyecto; vistas RGB y NIR derivadas de ese archivo. Objetivo: NIR.`
+        );
+      } else {
+        setTargetRasterId(String(res.data.raster_layer_id));
+        const meta = res.data.metadata || {};
+        const rbbox = bboxFromBoundsWgs84(meta.bounds_wgs84);
+        addMapLayer(rasterFile.name, "raster", null, res.data.raster_layer_id, rbbox ? { bbox: rbbox } : {});
+        setMessage(
+          rbbox
+            ? `Raster cargado correctamente (ID ${res.data.raster_layer_id}).`
+            : `Raster registrado (ID ${res.data.raster_layer_id}). Sin CRS en el archivo: no se podrá acercar ni superponer hasta georreferenciar.`
+        );
+      }
     } catch (error) {
       const detail = error?.response?.data?.detail || error.message || "Error al subir raster";
       setMessage(`Error: ${detail}`);
@@ -496,69 +673,96 @@ export default function App() {
     }
   }
 
-  async function importRasterFromDownloads(filename) {
-    if (!token || !projectId || !filename) return;
+  async function fetchS2Inventory() {
+    if (!token || !projectId) {
+      setMessage("Error: inicia sesion y selecciona un proyecto.");
+      return;
+    }
     setLoading(true);
     setMessage("");
     try {
       setAuthToken(token);
-      const res = await api.post(
-        `/raster/import-from-downloads?project_id=${projectId}&filename=${encodeURIComponent(filename)}`
+      const r = await api.get(`/raster/project-downloads-inventory/${projectId}`);
+      const z = r.data.zip_l2a?.length ?? 0;
+      const s = r.data.safe_folders?.length ?? 0;
+      const o = r.data.other_top_level?.length
+        ? ` Otros: ${r.data.other_top_level.join(", ")}.`
+        : "";
+      setMessage(
+        r.data.exists
+          ? `Inventario (${r.data.downloads_dir}): ${z} ZIP L2A, ${s} carpetas .SAFE.${o}`
+          : `Aun no existe la carpeta de descargas (${r.data.downloads_dir}). Descarga Sentinel-2 desde Cargar primero.`
       );
-      setTargetRasterId(String(res.data.raster_layer_id));
-      addMapLayer(res.data.name || filename, "raster", null, res.data.raster_layer_id);
-      setMessage(`Imagen importada a capas: ${res.data.name || filename}`);
     } catch (error) {
-      const detail = error?.response?.data?.detail || error.message || "Error al importar";
+      const detail = error?.response?.data?.detail || error.message || "Error";
       setMessage(`Error: ${detail}`);
     } finally {
       setLoading(false);
     }
   }
 
-  async function preprocessCrop() {
-    if (!token || !projectId || !targetRasterId) {
-      setMessage("Error: define proyecto y raster objetivo.");
+  async function runS2L2aRecortes(layerId) {
+    if (!token || !projectId) {
+      setMessage("Error: inicia sesion y selecciona un proyecto.");
       return;
     }
     setLoading(true);
     setMessage("");
     try {
       setAuthToken(token);
-      const res = await api.post("/preprocess/crop", {
-        project_id: Number(projectId),
-        raster_layer_id: Number(targetRasterId),
-        crop_ratio: 0.6,
-      });
-      addMapLayer("Recorte", "raster", null);
-      setMessage(`Recorte completado: ${res.data.output_path}`);
+      const body = { project_id: Number(projectId) };
+      if (layerId != null && layerId !== "") {
+        const n = Number(layerId);
+        if (!Number.isFinite(n) || !Number.isInteger(n) || n < 1) {
+          setMessage(
+            "Error: el polígono elegido no tiene ID de capa válido en el servidor. Vuelve a cargar el proyecto o sube de nuevo el lote."
+          );
+          return;
+        }
+        body.layer_id = n;
+      }
+      const res = await api.post("/preprocess/s2-l2a-recortes", body);
+      setRecorteTaskId(res.data.task_id);
+      setMessage(`Pipeline L2A en curso (tarea ${res.data.task_id}). Puede tardar si hay varios productos.`);
     } catch (error) {
-      const detail = error?.response?.data?.detail || error.message || "Error en recorte";
-      setMessage(`Error: ${detail}`);
+      setMessage(`Error: ${formatApiErrorDetail(error)}`);
     } finally {
       setLoading(false);
     }
   }
 
-  async function preprocessIndices() {
-    if (!token || !projectId || !targetRasterId) {
-      setMessage("Error: define proyecto y raster objetivo.");
+  async function runS2IndexStacks(explicitRasterIds) {
+    if (!token || !projectId) {
+      setMessage("Error: inicia sesión y selecciona un proyecto.");
+      return;
+    }
+    if (!selectedIndices.length) {
+      setMessage("Selecciona al menos un índice (o TODOS) en el desplegable.");
+      return;
+    }
+    const ids = Array.isArray(explicitRasterIds)
+      ? [...new Set(explicitRasterIds.map((x) => Number(x)).filter((n) => Number.isFinite(n) && n >= 1))]
+      : [];
+    if (ids.length === 0) {
+      setMessage(
+        "Abre «Seleccionar escenas e estimar índices», marca las escenas con stack de 6 bandas y pulsa Estimar índice."
+      );
       return;
     }
     setLoading(true);
     setMessage("");
     try {
       setAuthToken(token);
-      const res = await api.post("/preprocess/indices", {
+      const body = {
         project_id: Number(projectId),
-        raster_layer_id: Number(targetRasterId),
-        index_type: indiceType,
-      });
-      addMapLayer(`Indice ${res.data.index_type}`, "raster", null);
-      setMessage(`${res.data.index_type} calculado: ${res.data.output_path}`);
+        indices: selectedIndices,
+        raster_layer_ids: ids,
+      };
+      const res = await api.post("/preprocess/s2-index-stacks", body);
+      setIndexStacksTaskId(res.data.task_id);
+      setMessage(`Stacks de índices en cola (tarea ${res.data.task_id}).`);
     } catch (error) {
-      const detail = error?.response?.data?.detail || error.message || "Error en indices";
-      setMessage(`Error: ${detail}`);
+      setMessage(`Error: ${formatApiErrorDetail(error)}`);
     } finally {
       setLoading(false);
     }
@@ -567,6 +771,12 @@ export default function App() {
   async function preprocessStack() {
     if (!token || !projectId) {
       setMessage("Error: define proyecto.");
+      return;
+    }
+    if (stackMode === "visual-rgb" || stackMode === "visual-index") {
+      setMessage(
+        "Abre la galería con el botón en Procesos (opción Visual RGB o Visual índices)."
+      );
       return;
     }
     setLoading(true);
@@ -586,27 +796,58 @@ export default function App() {
     }
   }
 
-  async function preprocessCluster() {
-    if (!token || !projectId || !targetRasterId) {
-      setMessage("Error: define proyecto y raster objetivo.");
+  async function runClusterElbow() {
+    if (!token || !projectId) {
+      setMessage("Error: define proyecto.");
       return;
     }
-    setLoading(true);
+    setClusterElbowLoading(true);
+    setClusterGmmResults(null);
     setMessage("");
     try {
       setAuthToken(token);
-      const res = await api.post("/preprocess/cluster", {
+      const res = await api.post("/cluster-analysis/elbow", {
         project_id: Number(projectId),
-        raster_layer_id: Number(targetRasterId),
-        clusters: 4,
+        k_min: 1,
+        k_max: 10,
+        max_samples: 100_000,
+        random_state: 42,
       });
-      addMapLayer(`Cluster ${res.data.clusters}c`, "raster", null);
-      setMessage(`Cluster ejecutado (${res.data.clusters} clases): ${res.data.output_path}`);
+      setClusterElbowResults(res.data);
+      const n = res.data.datasets?.length ?? 0;
+      setMessage(
+        n > 0
+          ? `Método del codo listo (${n} dataset(s)). Ajusta K y ejecuta GMM.`
+          : "Sin resultados de codo."
+      );
     } catch (error) {
-      const detail = error?.response?.data?.detail || error.message || "Error en cluster";
-      setMessage(`Error: ${detail}`);
+      setMessage(`Error: ${formatApiErrorDetail(error)}`);
     } finally {
-      setLoading(false);
+      setClusterElbowLoading(false);
+    }
+  }
+
+  async function runClusterGmm(kByKey) {
+    if (!token || !projectId) {
+      setMessage("Error: define proyecto.");
+      return;
+    }
+    setClusterGmmLoading(true);
+    setMessage("");
+    try {
+      setAuthToken(token);
+      const res = await api.post("/cluster-analysis/gmm", {
+        project_id: Number(projectId),
+        k_by_key: kByKey,
+        max_samples: 100_000,
+        random_state: 42,
+      });
+      setClusterGmmResults(res.data);
+      setMessage(`GMM terminado. Salidas en ${res.data.output_dir}`);
+    } catch (error) {
+      setMessage(`Error: ${formatApiErrorDetail(error)}`);
+    } finally {
+      setClusterGmmLoading(false);
     }
   }
 
@@ -634,8 +875,8 @@ export default function App() {
         setRasterFile={setRasterFile}
         downloadSource={downloadSource}
         setDownloadSource={setDownloadSource}
-        indiceType={indiceType}
-        setIndiceType={setIndiceType}
+        selectedIndices={selectedIndices}
+        setSelectedIndices={setSelectedIndices}
         stackMode={stackMode}
         setStackMode={setStackMode}
         onLogin={loginWithCredentials}
@@ -652,16 +893,26 @@ export default function App() {
         onUploadRaster={uploadRaster}
         onRunAI={runAI}
         onDownload={preprocessDownload}
-        onImportRasterFromDownloads={importRasterFromDownloads}
-        onCrop={preprocessCrop}
-        onIndices={preprocessIndices}
+        recortePipelineBusy={!!recorteTaskId}
+        indexStacksBusy={!!indexStacksTaskId}
+        onFetchS2Inventory={fetchS2Inventory}
+        onS2L2aRecortes={runS2L2aRecortes}
+        onS2IndexStacks={runS2IndexStacks}
         onStack={preprocessStack}
-        onCluster={preprocessCluster}
+        clusterElbowLoading={clusterElbowLoading}
+        clusterGmmLoading={clusterGmmLoading}
+        clusterElbowResults={clusterElbowResults}
+        clusterGmmResults={clusterGmmResults}
+        onClusterElbow={runClusterElbow}
+        onClusterGmm={runClusterGmm}
         s2Download={s2Download}
       />
       <MapView
         mapRef={mapRef}
+        mapLayers={mapLayers}
         mapLayersRef={mapLayersRef}
+        projectId={projectId}
+        token={token}
         baseStyle={baseStyle}
         setBaseStyle={setBaseStyle}
       />

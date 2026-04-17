@@ -41,6 +41,22 @@ MVP funcional para portal geoespacial agrícola con arquitectura SaaS multi-tena
 5. PostgreSQL expuesto en host:
    - `localhost:5433`
 
+En el contenedor `backend`, `rasterio` y el resto de dependencias ya vienen instalados desde `backend/requirements.txt`.
+
+### Backend con venv local (sin Docker)
+
+Si corres la API en la máquina host, no uses el `python3` del sistema a pelo: instala el entorno del proyecto:
+
+```bash
+cd backend
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+python -c "import rasterio; print('rasterio', rasterio.__version__)"
+```
+
+`rasterio` está fijado en `requirements.txt`. Si el comando anterior falla, revisa que estés en el venv activado o, con Docker, usa el mismo intérprete que el servicio: `docker compose exec backend python -c "import rasterio"`.
+
 ## Opcion 2: PostgreSQL/PostGIS local Linux
 
 ```bash

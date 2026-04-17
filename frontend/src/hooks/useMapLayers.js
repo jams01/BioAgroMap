@@ -8,9 +8,14 @@ export default function useMapLayers(mapRef) {
   const [pendingDeletes, setPendingDeletes] = useState([]);
   const [dirty, setDirty] = useState(false);
 
-  function addMapLayer(name, kind, geojsonData, serverId) {
+  function addMapLayer(name, kind, geojsonData, serverId, options = {}) {
     const lid = `layer_${layerIdCounter.current++}`;
-    const bbox = geojsonData ? bboxFromGeojson(geojsonData) : null;
+    const bbox =
+      options.bbox != null
+        ? options.bbox
+        : geojsonData
+          ? bboxFromGeojson(geojsonData)
+          : null;
     const entry = {
       id: lid,
       name,
@@ -19,9 +24,11 @@ export default function useMapLayers(mapRef) {
       geojsonData,
       bbox,
       serverId: serverId || null,
+      metadata: options.metadata ?? null,
+      displayName: options.displayName ?? name,
     };
     setMapLayers((prev) => {
-      const next = [entry, ...prev];
+      const next = options.append ? [...prev, entry] : [entry, ...prev];
       mapLayersRef.current = next;
       return next;
     });

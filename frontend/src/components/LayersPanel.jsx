@@ -1,3 +1,6 @@
+import { useMemo } from "react";
+import { formatRecorteDisplayName, rasterSortKeyFromMetadata } from "../utils/geo";
+
 export default function LayersPanel({
   mapLayers,
   projectId,
@@ -8,6 +11,19 @@ export default function LayersPanel({
   onRemoveLayer,
   onSave,
 }) {
+  const orderedLayers = useMemo(() => {
+    const vectors = mapLayers.filter((l) => l.kind === "vector");
+    const rasters = mapLayers.filter((l) => l.kind === "raster");
+    rasters.sort((a, b) => {
+      const ka = rasterSortKeyFromMetadata(a.metadata);
+      const kb = rasterSortKeyFromMetadata(b.metadata);
+      const c = ka.localeCompare(kb);
+      if (c !== 0) return c;
+      return (a.serverId || 0) - (b.serverId || 0);
+    });
+    return [...vectors, ...rasters];
+  }, [mapLayers]);
+
   return (
     <div className="layers-panel">
       <div className="layers-panel-header">
@@ -17,19 +33,26 @@ export default function LayersPanel({
         {mapLayers.length === 0 ? (
           <li className="layers-empty">Sin capas cargadas</li>
         ) : (
-          mapLayers.map((l) => (
+          orderedLayers.map((l) => {
+            const label =
+              l.displayName ||
+              (l.kind === "raster"
+                ? formatRecorteDisplayName(l.metadata, l.name)
+                : null) ||
+              l.name;
+            return (
             <li key={l.id} className="layers-item">
               <input
                 type="checkbox"
                 checked={l.visible}
                 onChange={() => onToggleVisibility(l.id)}
-                aria-label={`Mostrar/ocultar ${l.name}`}
+                aria-label={`Mostrar/ocultar ${label}`}
               />
               <span className={`layers-badge ${l.kind}`}>
                 {l.kind === "vector" ? "V" : "R"}
               </span>
-              <span className="layers-name" title={l.name}>
-                {l.name}
+              <span className="layers-name" title={label}>
+                {label}
               </span>
               <button
                 className="layers-zoom"
@@ -46,7 +69,8 @@ export default function LayersPanel({
                 &times;
               </button>
             </li>
-          ))
+            );
+          })
         )}
       </ul>
       {projectId && (

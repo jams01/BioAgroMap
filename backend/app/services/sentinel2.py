@@ -1,6 +1,6 @@
 """
 Sentinel-2 download service using Copernicus Data Space.
-Searches and downloads S2A L1C products month by month for a given WKT polygon.
+Searches and downloads S2 L2A (MSIL2A) products month by month for a given WKT polygon.
 Only downloads products that cover >= 75% of the user's area of interest.
 """
 from __future__ import annotations
@@ -65,7 +65,13 @@ def _product_covers_area(product: dict, aoi_geom) -> bool:
         return True
 
 
-def download_product(product_id: str, product_name: str, session: requests.Session, output_dir: str) -> str | None:
+def download_product(
+    product_id: str,
+    product_name: str,
+    session: requests.Session,
+    output_dir: str,
+    stream_progress: Callable[[int, int, str], None] | None = None,
+) -> str | None:
     url = f"{CATALOGUE_URL}({product_id})/$value"
     r1 = session.get(url, allow_redirects=False, timeout=30)
     download_url = r1.headers.get("Location", url)
@@ -79,10 +85,38 @@ def download_product(product_id: str, product_name: str, session: requests.Sessi
     r2.raise_for_status()
     zip_path = os.path.join(output_dir, f"{product_name}.zip")
     total_size = 0
+    total_hint: int | None = None
+    cl = r2.headers.get("Content-Length")
+    if cl and str(cl).isdigit():
+        total_hint = int(cl)
+    # Porcentaje dentro de la fase de descarga del ZIP (la barra no queda congelada varios minutos).
+    lo_pct, hi_pct = 88, 99
+    throttle = 2 * 1024 * 1024
+    last_emit = 0
+
+    def _emit_progress(force: bool = False) -> None:
+        nonlocal last_emit
+        if not stream_progress:
+            return
+        if not force and total_size - last_emit < throttle:
+            return
+        last_emit = total_size
+        mb = total_size // (1024 * 1024)
+        if total_hint and total_hint > 0:
+            frac = min(1.0, total_size / total_hint)
+            pct = lo_pct + int(frac * (hi_pct - lo_pct))
+        else:
+            pct = (lo_pct + hi_pct) // 2
+        stream_progress(pct, 100, f"Descargando {product_name}... ({mb} MB)")
+
     with open(zip_path, "wb") as f:
-        for chunk in r2.iter_content(chunk_size=8192):
+        for chunk in r2.iter_content(chunk_size=8192 * 16):
+            if not chunk:
+                continue
             f.write(chunk)
             total_size += len(chunk)
+            _emit_progress(force=False)
+    _emit_progress(force=True)
     logger.info("Downloaded %s (%d MB)", product_name, total_size // (1024 * 1024))
     return zip_path
 
@@ -96,7 +130,7 @@ def search_and_download_monthly(
     copernicus_password: str,
     progress_callback: Callable[[int, int, str], None] | None = None,
 ) -> dict:
-    """Download S2A L1C products per month that cover >=75% of the WKT area."""
+    """Download S2 L2A (MSIL2A) products per month that cover >=75% of the WKT area."""
     os.makedirs(output_dir, exist_ok=True)
     total_downloaded = 0
     total_size_mb = 0
@@ -150,17 +184,21 @@ def search_and_download_monthly(
             j = resp.json()
 
             products = j.get("value", [])
-            s2a_products = [p for p in products if p["Name"].startswith("S2A_MSIL1C")]
+            s2_l2a_products = [
+                p
+                for p in products
+                if p["Name"].startswith("S2A_MSIL2A") or p["Name"].startswith("S2B_MSIL2A")
+            ]
 
-            if not s2a_products:
-                logger.info("No S2A L1C products for %s", start_str)
+            if not s2_l2a_products:
+                logger.info("No S2 L2A (MSIL2A) products for %s", start_str)
                 current = next_month
                 continue
 
-            s2a_products.sort(key=lambda p: p["ContentDate"]["Start"])
+            s2_l2a_products.sort(key=lambda p: p["ContentDate"]["Start"])
 
             downloaded_this_month = False
-            for product in s2a_products:
+            for product in s2_l2a_products:
                 if not _product_covers_area(product, aoi_geom):
                     skipped_low_coverage += 1
                     continue
@@ -174,7 +212,13 @@ def search_and_download_monthly(
                     downloaded_files.append(expected_file)
                 else:
                     _report(f"Descargando {identifier}...", 0.5)
-                    zip_path = download_product(prod_id, identifier, session, output_dir)
+                    zip_path = download_product(
+                        prod_id,
+                        identifier,
+                        session,
+                        output_dir,
+                        stream_progress=progress_callback,
+                    )
                     if zip_path and os.path.exists(zip_path):
                         file_size = os.path.getsize(zip_path) // (1024 * 1024)
                         total_downloaded += 1

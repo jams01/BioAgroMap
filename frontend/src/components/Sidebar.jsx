@@ -27,8 +27,9 @@ export default function Sidebar({
   setRasterFile,
   downloadSource,
   setDownloadSource,
-  indiceType,
-  setIndiceType,
+  selectedIndices,
+  setSelectedIndices,
+  indexStacksBusy,
   stackMode,
   setStackMode,
   onLogin,
@@ -45,11 +46,17 @@ export default function Sidebar({
   onUploadRaster,
   onRunAI,
   onDownload,
-  onImportRasterFromDownloads,
-  onCrop,
-  onIndices,
+  recortePipelineBusy,
+  onFetchS2Inventory,
+  onS2L2aRecortes,
+  onS2IndexStacks,
   onStack,
-  onCluster,
+  clusterElbowLoading,
+  clusterGmmLoading,
+  clusterElbowResults,
+  clusterGmmResults,
+  onClusterElbow,
+  onClusterGmm,
   s2Download,
 }) {
   const [activeTab, setActiveTab] = useState("admin");
@@ -165,7 +172,6 @@ export default function Sidebar({
           onUploadRaster={onUploadRaster}
           onRunAI={onRunAI}
           onDownload={onDownload}
-          onImportRasterFromDownloads={onImportRasterFromDownloads}
           loteFile={loteFile}
           setLoteFile={setLoteFile}
           rasterFile={rasterFile}
@@ -182,15 +188,23 @@ export default function Sidebar({
           token={token}
           projectId={projectId}
           loading={loading}
-          targetRasterId={targetRasterId}
-          indiceType={indiceType}
-          setIndiceType={setIndiceType}
+          selectedIndices={selectedIndices}
+          setSelectedIndices={setSelectedIndices}
           stackMode={stackMode}
           setStackMode={setStackMode}
-          onCrop={onCrop}
-          onIndices={onIndices}
+          mapLayers={mapLayers}
+          recortePipelineBusy={recortePipelineBusy}
+          indexStacksBusy={indexStacksBusy}
+          onFetchS2Inventory={onFetchS2Inventory}
+          onS2L2aRecortes={onS2L2aRecortes}
+          onS2IndexStacks={onS2IndexStacks}
           onStack={onStack}
-          onCluster={onCluster}
+          clusterElbowLoading={clusterElbowLoading}
+          clusterGmmLoading={clusterGmmLoading}
+          clusterElbowResults={clusterElbowResults}
+          clusterGmmResults={clusterGmmResults}
+          onClusterElbow={onClusterElbow}
+          onClusterGmm={onClusterGmm}
         />
       ) : null}
 

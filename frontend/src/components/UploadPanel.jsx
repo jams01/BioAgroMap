@@ -1,5 +1,4 @@
-import { useEffect, useState } from "react";
-import api from "../api";
+import { useState } from "react";
 
 export default function UploadPanel({
   token,
@@ -11,7 +10,6 @@ export default function UploadPanel({
   onUploadRaster,
   onRunAI,
   onDownload,
-  onImportRasterFromDownloads,
   loteFile,
   setLoteFile,
   rasterFile,
@@ -26,26 +24,6 @@ export default function UploadPanel({
   const [selectedLayerId, setSelectedLayerId] = useState("");
   const [uploadedLayerId, setUploadedLayerId] = useState("");
   const [loteMode, setLoteMode] = useState("existing");
-  const [downloadFiles, setDownloadFiles] = useState([]);
-
-  useEffect(() => {
-    if (!token || !projectId) {
-      setDownloadFiles([]);
-      return undefined;
-    }
-    let cancelled = false;
-    (async () => {
-      try {
-        const r = await api.get(`/raster/project-downloads/${projectId}`);
-        if (!cancelled) setDownloadFiles(r.data.files || []);
-      } catch {
-        if (!cancelled) setDownloadFiles([]);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [token, projectId, s2Download?.ui_status]);
 
   const vectorLayers = mapLayers.filter((l) => l.kind === "vector");
   const hasVectorLayers = vectorLayers.length > 0;
@@ -142,40 +120,6 @@ export default function UploadPanel({
             )}
           </>
         )}
-
-        <div className="downloads-explorer">
-          <div className="downloads-explorer-title">Carpeta de descargas Sentinel-2</div>
-          <p className="downloads-hint">
-            Las imagenes descargadas no se añaden solas al mapa. Revise los archivos en la carpeta del proyecto y
-            pulse &quot;Añadir al mapa&quot; en el raster que desee usar.
-          </p>
-          {token && projectId && downloadFiles.length === 0 ? (
-            <div className="status-msg">No hay archivos en la carpeta de descargas (aun).</div>
-          ) : null}
-          {token && projectId && downloadFiles.length > 0 ? (
-            <ul className="downloads-list">
-              {downloadFiles.map((f) => {
-                const canImport = [".tif", ".tiff", ".jp2", ".png", ".jpg", ".jpeg"].includes(f.ext);
-                const mb = f.size_bytes / (1024 * 1024);
-                return (
-                  <li key={f.name} className="downloads-item">
-                    <span className="downloads-name" title={f.name}>{f.name}</span>
-                    <span className="downloads-size">{mb >= 0.1 ? `${mb.toFixed(1)} MB` : `${(f.size_bytes / 1024).toFixed(0)} KB`}</span>
-                    <button
-                      type="button"
-                      className="btn-import-download"
-                      disabled={loading || !canImport || !onImportRasterFromDownloads}
-                      title={canImport ? "Copiar a capas raster del proyecto" : "Descomprima el ZIP y use un .tif/.jp2"}
-                      onClick={() => onImportRasterFromDownloads?.(f.name)}
-                    >
-                      Añadir al mapa
-                    </button>
-                  </li>
-                );
-              })}
-            </ul>
-          ) : null}
-        </div>
       </fieldset>
 
       <fieldset className="step-fieldset">
@@ -233,7 +177,12 @@ export default function UploadPanel({
         {isSentinel2 && s2Download && s2Download.ui_status === "completed" && (
           <div className="s2-progress s2-progress-done" role="status">
             <strong>Terminado</strong>
-            <span className="s2-progress-msg">{s2Download.message || "Descarga completada"}</span>
+            <span className="s2-progress-msg">
+              {s2Download.message || "Descarga completada"}
+              {s2Download.totalDownloaded != null
+                ? ` (${s2Download.totalDownloaded} archivo(s)${s2Download.totalSizeMb != null ? `, ~${s2Download.totalSizeMb} MB` : ""})`
+                : ""}
+            </span>
           </div>
         )}
         {isSentinel2 && s2Download && s2Download.ui_status === "failed" && (
@@ -246,9 +195,15 @@ export default function UploadPanel({
 
       <fieldset className="step-fieldset">
         <legend>3) Subir raster</legend>
+        <p className="hint-msg">
+          ZIP <code>.SAFE</code>: se guarda un TIF 4 bandas (B04,B03,B02,B08) con fecha de la carpeta{" "}
+          (<code>dd-mm-AAAA_S2_4band_…</code>) y solo se añaden al mapa{" "}
+          <strong>2 capas</strong>: RGB (B04,B03,B02) y NIR (B08,B04,B03), nombres{" "}
+          <code>dd/mm/AAAA_RGB</code> y <code>dd/mm/AAAA_NIR</code>.
+        </p>
         <input
           type="file"
-          accept=".tif,.tiff,.jp2,.png,.jpg,.jpeg"
+          accept=".tif,.tiff,.jp2,.png,.jpg,.jpeg,.zip"
           onChange={(e) => setRasterFile(e.target.files?.[0] || null)}
           disabled={loading}
         />

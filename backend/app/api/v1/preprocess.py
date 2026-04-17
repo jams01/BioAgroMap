@@ -8,7 +8,12 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.api.deps import tenant_from_jwt
-from app.api.v1.helpers import _existing_raster_path, _get_project_raster, _tenant_storage
+from app.api.v1.helpers import (
+    _existing_raster_path,
+    _get_project_raster,
+    _tenant_storage,
+    is_legacy_s2_zip_band_raster,
+)
 from app.core.config import settings
 from app.db.session import get_db
 from app.models.models import Layer, Project, RasterLayer
@@ -17,94 +22,12 @@ from app.schemas.schemas import (
     CropRequest,
     DownloadRequest,
     IndicesRequest,
+    S2IndexStacksRequest,
+    S2L2aRecorteRequest,
     StackRequest,
 )
 
 router = APIRouter()
-
-
-def _layer_to_geojson(layer: Layer) -> dict | None:
-    """Convert any supported layer format to GeoJSON dict."""
-    import zipfile
-    from pathlib import Path
-
-    from app.api.v1.layers import _kml_to_geojson, _safe_zip_name
-
-    fp = Path(layer.file_path)
-    if not fp.exists():
-        return None
-
-    ext = fp.suffix.lower()
-    try:
-        if ext in {".geojson", ".json"}:
-            return json.loads(fp.read_text(encoding="utf-8"))
-        if ext == ".kml":
-            return _kml_to_geojson(fp.read_text(encoding="utf-8"))
-        if ext == ".kmz":
-            with zipfile.ZipFile(fp) as zf:
-                for name in zf.namelist():
-                    if not _safe_zip_name(name):
-                        continue
-                    if name.lower().endswith(".kml"):
-                        result = _kml_to_geojson(zf.read(name).decode("utf-8"))
-                        if result:
-                            return result
-        if ext == ".zip":
-            with zipfile.ZipFile(fp) as zf:
-                for name in zf.namelist():
-                    if not _safe_zip_name(name):
-                        continue
-                    if name.lower().endswith((".geojson", ".json")):
-                        return json.loads(zf.read(name).decode("utf-8"))
-                    if name.lower().endswith(".kml"):
-                        result = _kml_to_geojson(zf.read(name).decode("utf-8"))
-                        if result:
-                            return result
-    except Exception:
-        pass
-    return None
-
-
-def _wkt_from_project_layers(db: Session, project_id: int, tenant_id: int, layer_id: int | None = None) -> str | None:
-    """Extract WKT polygon from a specific layer or all project vector layers."""
-    if layer_id:
-        layer = db.query(Layer).filter(
-            Layer.id == layer_id, Layer.project_id == project_id, Layer.tenant_id == tenant_id
-        ).first()
-        layers = [layer] if layer else []
-    else:
-        layers = db.query(Layer).filter(
-            Layer.project_id == project_id, Layer.tenant_id == tenant_id
-        ).all()
-
-    if not layers:
-        return None
-
-    from shapely.geometry import shape
-    from shapely.ops import unary_union
-
-    all_geoms = []
-    for layer in layers:
-        geojson_data = _layer_to_geojson(layer)
-        if not geojson_data:
-            continue
-        features = geojson_data.get("features", [geojson_data])
-        for f in features:
-            geom_dict = f.get("geometry") or f
-            if not geom_dict or not geom_dict.get("type"):
-                continue
-            try:
-                all_geoms.append(shape(geom_dict))
-            except Exception:
-                continue
-
-    if not all_geoms:
-        return None
-
-    union = unary_union(all_geoms)
-    if union.geom_type == "MultiPolygon" and len(union.geoms) == 1:
-        union = union.geoms[0]
-    return union.wkt
 
 
 @router.post("/preprocess/download")
@@ -119,7 +42,9 @@ def preprocess_download(payload: DownloadRequest, db: Session = Depends(get_db),
         if not payload.start_date or not payload.end_date:
             raise HTTPException(status_code=400, detail="start_date and end_date are required for Sentinel-2")
 
-        wkt = _wkt_from_project_layers(db, payload.project_id, tenant_id, payload.layer_id)
+        from app.services.project_geometry import wkt_union_from_project_layers
+
+        wkt = wkt_union_from_project_layers(db, payload.project_id, tenant_id, payload.layer_id)
         if not wkt:
             raise HTTPException(status_code=400, detail="No vector layer found in project to define download area. Upload a lote first.")
 
@@ -242,42 +167,44 @@ def sentinel_download_status(
         }
 
     task_id = meta.get("celery_task_id")
+    celery_state = None
     if task_id:
         ar = AsyncResult(task_id, app=celery_app)
-        if ar.state == "PROGRESS" and isinstance(ar.info, dict):
-            return {
-                "ui_status": "downloading",
-                "progress": int(ar.info.get("progress", progress)),
-                "message": ar.info.get("message", message),
-                "celery_state": ar.state,
-            }
-        if ar.state in ("PENDING", "STARTED"):
-            return {
-                "ui_status": "downloading",
-                "progress": max(progress, 0),
-                "message": "En cola o iniciando...",
-                "celery_state": ar.state,
-            }
-        if ar.state == "SUCCESS":
+        celery_state = ar.state
+
+        # Celery a menudo queda en STARTED mientras el worker actualiza la BD; la barra y el
+        # mensaje deben salir sobre todo de raster_metadata (progress_callback).
+        if celery_state == "PROGRESS" and isinstance(ar.info, dict):
+            cp = int(ar.info.get("progress", 0) or 0)
+            cm = ar.info.get("message")
+            progress = max(progress, cp)
+            if cm:
+                message = str(cm)
+
+        if celery_state == "SUCCESS" or (ar.ready() and ar.successful()):
             return {
                 "ui_status": "completed",
                 "progress": 100,
-                "message": "Descarga terminada",
-                "celery_state": ar.state,
+                "message": meta.get("progress_message") or "Descarga terminada",
+                "total_downloaded": meta.get("total_downloaded"),
+                "total_size_mb": meta.get("total_size_mb"),
+                "celery_state": celery_state,
             }
-        if ar.state == "FAILURE":
+
+        if celery_state == "FAILURE" or (ar.ready() and ar.failed()):
             err = str(ar.result) if ar.result else "Error en la tarea"
             return {
                 "ui_status": "failed",
                 "progress": 0,
                 "message": err,
-                "celery_state": ar.state,
+                "celery_state": celery_state,
             }
 
     return {
         "ui_status": "downloading",
         "progress": progress,
         "message": message,
+        "celery_state": celery_state,
     }
 
 
@@ -299,7 +226,51 @@ def preprocess_crop(payload: CropRequest, db: Session = Depends(get_db), tenant_
         profile.update(height=h, width=w, transform=src.window_transform(window))
         with rasterio.open(out_path, "w", **profile) as dst:
             dst.write(data)
-    return {"status": "ok"}
+    return {"status": "ok", "output_path": str(out_path)}
+
+
+@router.post("/preprocess/s2-index-stacks")
+def preprocess_s2_index_stacks(
+    payload: S2IndexStacksRequest,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(tenant_from_jwt),
+):
+    """
+    Genera stacks multibanda (una banda por escena/fecha) por índice en ``indices/<INDICE>/``.
+    Requiere GeoTIFF de recorte L2A de 6 bandas en ``recortes/``.
+    """
+    from app.services.s2_vegetation_indices import normalize_requested_indices
+    from app.tasks.jobs import s2_index_stacks_pipeline
+
+    project = db.query(Project).filter(Project.id == payload.project_id, Project.tenant_id == tenant_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    pairs = normalize_requested_indices(payload.indices)
+    if not pairs:
+        raise HTTPException(
+            status_code=400,
+            detail="Selecciona al menos un índice (o TODOS).",
+        )
+
+    rids = payload.raster_layer_ids
+    if rids is not None and len(rids) == 0:
+        rids = None
+
+    try:
+        async_result = s2_index_stacks_pipeline.delay(
+            tenant_id,
+            payload.project_id,
+            payload.indices,
+            settings.database_url,
+            rids,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"No se pudo encolar la tarea de índices. ¿Redis y worker activos? {exc!s}",
+        ) from exc
+    return {"status": "queued", "task_id": async_result.id}
 
 
 @router.post("/preprocess/indices")
@@ -340,6 +311,7 @@ def preprocess_stack(payload: StackRequest, db: Session = Depends(get_db), tenan
         .order_by(RasterLayer.id.desc())
         .all()
     )
+    rasters = [r for r in rasters if not is_legacy_s2_zip_band_raster(r.raster_metadata)]
     if not rasters:
         raise HTTPException(status_code=404, detail="No rasters available")
     if payload.mode.lower() == "visualizar":
@@ -378,3 +350,88 @@ def preprocess_cluster(
         with rasterio.open(out_path, "w", **profile) as dst:
             dst.write(classified, 1)
     return {"status": "ok", "clusters": k}
+
+
+@router.post("/preprocess/s2-l2a-recortes")
+def preprocess_s2_l2a_recortes(
+    payload: S2L2aRecorteRequest,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(tenant_from_jwt),
+):
+    """
+    Por cada producto L2A (.zip o carpeta .SAFE) en la carpeta de descargas del proyecto:
+    apila 6 bandas (B02,B03,B04,B08; B05 y B11 remuestreadas a la grilla 10 m de B02), recorta al
+    polígono del lote, guarda en `recortes/` (GeoTIFF con nombre del producto) y registra la capa (vista RGB R=B04,G=B03,B=B02).
+    """
+    from app.services.project_geometry import wkt_union_from_project_layers
+    from app.tasks.jobs import s2_l2a_recortes_pipeline
+
+    project = db.query(Project).filter(Project.id == payload.project_id, Project.tenant_id == tenant_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    if payload.layer_id is not None:
+        found = (
+            db.query(Layer)
+            .filter(
+                Layer.id == payload.layer_id,
+                Layer.project_id == payload.project_id,
+                Layer.tenant_id == tenant_id,
+            )
+            .first()
+        )
+        if not found:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No existe la capa vectorial {payload.layer_id} en este proyecto.",
+            )
+
+    wkt = wkt_union_from_project_layers(db, payload.project_id, tenant_id, payload.layer_id)
+    if not wkt:
+        if payload.layer_id is not None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"No se pudo leer geometría para la capa {payload.layer_id} "
+                    "(archivo ausente o formato no soportado). Comprueba el lote o elige «Todos los lotes»."
+                ),
+            )
+        raise HTTPException(
+            status_code=400,
+            detail="No hay polígono vectorial en el proyecto. Carga un lote antes.",
+        )
+
+    try:
+        async_result = s2_l2a_recortes_pipeline.delay(
+            tenant_id,
+            payload.project_id,
+            project.name,
+            payload.layer_id,
+            settings.database_url,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "No se pudo encolar la tarea de recorte. Comprueba que Redis esté en marcha "
+                f"y el worker Celery activo. Detalle: {exc!s}"
+            ),
+        ) from exc
+    return {"status": "queued", "task_id": async_result.id}
+
+
+@router.get("/preprocess/task-status/{task_id}")
+def preprocess_task_status(task_id: str):
+    """Estado de una tarea Celery (p. ej. pipeline S2 L2A recortes)."""
+    from celery.result import AsyncResult
+
+    from app.tasks.celery_app import celery_app
+
+    ar = AsyncResult(task_id, app=celery_app)
+    if ar.state == "PENDING":
+        return {"state": ar.state, "ready": False}
+    if ar.state == "SUCCESS":
+        return {"state": ar.state, "ready": True, "result": ar.result}
+    if ar.state == "FAILURE":
+        return {"state": ar.state, "ready": True, "error": str(ar.result) if ar.result else "failure"}
+    return {"state": ar.state, "ready": ar.ready(), "info": ar.info}

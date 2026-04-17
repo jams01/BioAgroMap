@@ -1,4 +1,5 @@
 import logging
+import os
 
 import redis as redis_lib
 from fastapi import FastAPI, Request
@@ -7,9 +8,10 @@ from fastapi.responses import JSONResponse
 from prometheus_fastapi_instrumentator import Instrumentator
 
 from app.api.v1.routes import router as v1_router
-from app.core.config import settings
+from app.core.config import get_max_upload_mb, settings
 logging.basicConfig(level=logging.INFO)
 audit_logger = logging.getLogger("audit")
+logger = logging.getLogger(__name__)
 
 # Schema managed by Alembic migrations (run: alembic upgrade head)
 
@@ -23,6 +25,16 @@ app.add_middleware(
 )
 app.include_router(v1_router, prefix=settings.api_v1_prefix)
 Instrumentator().instrument(app).expose(app, endpoint="/metrics")
+
+
+@app.on_event("startup")
+def _log_upload_limit() -> None:
+    logger.info(
+        "Subidas: límite efectivo %s MB (env MAX_UPLOAD_MB=%r)",
+        get_max_upload_mb(),
+        os.environ.get("MAX_UPLOAD_MB"),
+    )
+    logger.info("Almacenamiento: STORAGE_PATH=%r", settings.storage_path)
 
 _redis_client = None
 

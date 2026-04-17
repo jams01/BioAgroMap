@@ -2,10 +2,10 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.api.deps import issue_tokens
-from app.core.security import hash_password, verify_password
+from app.core.security import decode_token, hash_password, verify_password
 from app.db.session import get_db
 from app.models.models import Tenant, User
-from app.schemas.schemas import LoginRequest, RegisterRequest, TokenResponse
+from app.schemas.schemas import LoginRequest, RefreshRequest, RegisterRequest, TokenResponse
 
 router = APIRouter()
 
@@ -23,6 +23,18 @@ def register(payload: RegisterRequest, db: Session = Depends(get_db)):
     db.add(user)
     db.commit()
     db.refresh(user)
+    return issue_tokens(user)
+
+
+@router.post("/auth/refresh", response_model=TokenResponse)
+def refresh_session(payload: RefreshRequest, db: Session = Depends(get_db)):
+    """Emite nuevos access/refresh tokens a partir de un refresh token válido."""
+    claims = decode_token(payload.refresh_token)
+    if claims.get("type") != "refresh":
+        raise HTTPException(status_code=401, detail="Invalid token type")
+    user = db.query(User).filter(User.id == int(claims["sub"])).first()
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid user")
     return issue_tokens(user)
 
 

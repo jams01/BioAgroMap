@@ -22,7 +22,8 @@ services:
     volumes:
       - ./backend:/app
       - ./data:/data
-    command: bash -lc "apt-get update && apt-get install -y libexpat1 && pip install -r requirements.txt && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    # --reload: aplica cambios en .py sin reconstruir imagen (volúmen ./backend:/app).
+    command: bash -lc "apt-get update && apt-get install -y libexpat1 && pip install -r requirements.txt && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --reload-dir /app"
     env_file:
       - .env
     environment:
@@ -30,6 +31,10 @@ services:
       REDIS_URL: redis://redis:6379/0
       STORAGE_PATH: /data/storage
       SECRET_KEY: super-secret-dev-key
+      MAX_UPLOAD_MB: "4096"
+      PYTHONDONTWRITEBYTECODE: "1"
+      # Volúmenes Docker: forzar polling para que --reload detecte cambios en .py (Linux/Mac/Win).
+      WATCHFILES_FORCE_POLLING: "true"
     ports:
       - "8000:8000"
     depends_on:
@@ -42,11 +47,14 @@ services:
     volumes:
       - ./backend:/app
       - ./data:/data
-    command: bash -lc "apt-get update && apt-get install -y libexpat1 && pip install -r requirements.txt && celery -A app.tasks.celery_app.celery_app worker --loglevel=info"
+    # watchfiles: el worker recarga al cambiar .py (uvicorn sí recarga; Celery no, sin esto seguiría el código viejo).
+    # --concurrency=1: un solo proceso pesado (Sentinel-2) evita OOM / SIGKILL 9; --max-tasks-per-child libera RAM tras cada tarea.
+    command: bash -lc "apt-get update && apt-get install -y libexpat1 && pip install -r requirements.txt && watchfiles --filter python 'celery -A app.tasks.celery_app.celery_app worker --loglevel=info --concurrency=1 --max-tasks-per-child=2' ."
     environment:
       DATABASE_URL: postgresql+psycopg2://postgres:postgres@postgres:5432/bioagromap
       REDIS_URL: redis://redis:6379/0
       STORAGE_PATH: /data/storage
+      MAX_UPLOAD_MB: "4096"
     env_file:
       - .env
     depends_on:
@@ -70,10 +78,13 @@ services:
       - ./frontend:/app
     command: bash -lc "npm install && npm run dev"
     environment:
-      VITE_API_URL: http://localhost:8000/api/v1
+      # Sin VITE_API_URL: el cliente usa el mismo origen (:5173) + /api/v1 y Vite hace proxy al backend
+      BACKEND_PROXY_URL: http://backend:8000
       VITE_MAPBOX_TOKEN: ${VITE_MAPBOX_TOKEN:-}
     ports:
       - "5173:5173"
+    depends_on:
+      - backend
 
   prometheus:
     image: prom/prometheus:v2.54.1
