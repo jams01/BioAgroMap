@@ -115,8 +115,11 @@ export default function PreprocessPanel({
   onClusterElbow,
   onClusterGmm,
   onLoadPersistedClusterGmm,
+  recorteLayerId,
+  setRecorteLayerId,
+  preproGalleryKick = 0,
+  preproClusterVizKick = 0,
 }) {
-  const [recorteLayerId, setRecorteLayerId] = useState("");
   const [clusterModalOpen, setClusterModalOpen] = useState(false);
   const [clusterResultsModalOpen, setClusterResultsModalOpen] = useState(false);
   const [clusterApiBuild, setClusterApiBuild] = useState("");
@@ -145,6 +148,9 @@ export default function PreprocessPanel({
   const [clusterPeekHint, setClusterPeekHint] = useState("");
   const [loadingClusterPersisted, setLoadingClusterPersisted] = useState(false);
   const lastVisualIndexKick = useRef(0);
+  const lastPreproGalleryKick = useRef(0);
+  const lastPreproClusterVizKick = useRef(0);
+  const openClusterGmmResultsOrHintRef = useRef(async () => {});
   const vectorLayers = mapLayers.filter((l) => l.kind === "vector");
   const hasVectors = vectorLayers.length > 0;
   const busy = loading || recortePipelineBusy || indexStacksBusy;
@@ -172,6 +178,8 @@ export default function PreprocessPanel({
     setL2aJobSourceSubpath(undefined);
     setL2aError("");
     setL2aSelected(new Set());
+    lastPreproGalleryKick.current = 0;
+    lastPreproClusterVizKick.current = 0;
   }, [projectId]);
 
   function openL2aDownloadsModal() {
@@ -274,6 +282,13 @@ export default function PreprocessPanel({
   }, [visualIndexGalleryKick]);
 
   useEffect(() => {
+    if (!preproGalleryKick || preproGalleryKick <= lastPreproGalleryKick.current) return;
+    lastPreproGalleryKick.current = preproGalleryKick;
+    setGalleryMode("view");
+    setGalleryOpen(true);
+  }, [preproGalleryKick]);
+
+  useEffect(() => {
     if (!clusterModalOpen) return;
     api
       .get("/cluster-analysis/capabilities")
@@ -329,17 +344,18 @@ export default function PreprocessPanel({
     }
   }
 
+  openClusterGmmResultsOrHintRef.current = openClusterGmmResultsOrHint;
+
+  useEffect(() => {
+    if (!preproClusterVizKick || preproClusterVizKick <= lastPreproClusterVizKick.current) return;
+    lastPreproClusterVizKick.current = preproClusterVizKick;
+    void openClusterGmmResultsOrHintRef.current();
+  }, [preproClusterVizKick]);
+
   return (
     <>
-      <p className="prepro-hint">
-        <strong>1) Sentinel-2 L2A en descargas:</strong> lista los ZIP/carpetas .SAFE, apila B02,B03,B04,B05
-        (10 m),B08,B11 (10 m) en un solo GeoTIFF, recorta al lote, guarda en{" "}
-        <code>recortes/</code> (raíz de recortes del proyecto). El mapa usa color
-        natural R=B04, G=B03, B=B02.
-      </p>
-
       <label>
-        Polígono para recorte (opcional)
+        1. Polígonos para recorte
         <select
           value={recorteLayerId}
           onChange={(e) => setRecorteLayerId(e.target.value)}

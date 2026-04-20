@@ -82,6 +82,17 @@ class ClusterRequest(BaseModel):
     clusters: int = 4
 
 
+class S1GrdRecorteRequest(BaseModel):
+    """Recorte (subset espacial) de productos Sentinel-1 GRD IW bajo ``downloads/<slug>/Sentinel1/``."""
+
+    project_id: int
+    layer_id: int | None = None
+    product_paths: list[str] = Field(
+        min_length=1,
+        description="Rutas relativas a ``Sentinel1/`` (posix), p. ej. ``escena.SAFE`` o ``2026/01/escena.SAFE`` o ``x.zip``.",
+    )
+
+
 class S2L2aRecorteRequest(BaseModel):
     """Recorte de productos Sentinel-2 L2A en carpeta de descargas al polígono del proyecto."""
 

@@ -4,8 +4,17 @@ import ProjectList from "./ProjectList";
 import LayersPanel from "./LayersPanel";
 import UploadPanel from "./UploadPanel";
 import PreprocessPanel from "./PreprocessPanel";
+import Sentinel1Panel from "./Sentinel1Panel";
 
 export default function Sidebar({
+  activeTab,
+  setActiveTab,
+  recorteLayerId,
+  setRecorteLayerId,
+  preproGalleryKick,
+  preproClusterVizKick,
+  onOpenPreproGallery,
+  onOpenPreproClusterViz,
   token,
   email,
   setEmail,
@@ -48,6 +57,7 @@ export default function Sidebar({
   onDownload,
   recortePipelineBusy,
   onS2L2aRecortes,
+  onS1GrdRecortes,
   onS2IndexStacks,
   clusterElbowLoading,
   clusterGmmLoading,
@@ -57,8 +67,8 @@ export default function Sidebar({
   onClusterGmm,
   onLoadPersistedClusterGmm,
   s2Download,
+  s1Download,
 }) {
-  const [activeTab, setActiveTab] = useState("admin");
   const [panelOpen, setPanelOpen] = useState(true);
   const [layersPanelOpen, setLayersPanelOpen] = useState(false);
 
@@ -99,6 +109,21 @@ export default function Sidebar({
         </button>
         <button
           role="tab"
+          aria-selected={panelOpen && activeTab === "s1"}
+          type="button"
+          className={
+            (panelOpen && activeTab === "s1" ? "active " : "") + "top-tab-s1"
+          }
+          onClick={() => {
+            setActiveTab("s1");
+            setPanelOpen(true);
+            setLayersPanelOpen(false);
+          }}
+        >
+          SI
+        </button>
+        <button
+          role="tab"
           aria-selected={panelOpen && activeTab === "prepro"}
           className={panelOpen && activeTab === "prepro" ? "active" : ""}
           onClick={() => {
@@ -107,7 +132,7 @@ export default function Sidebar({
             setLayersPanelOpen(false);
           }}
         >
-          Procesos
+          S2
         </button>
         <button
           role="tab"
@@ -164,6 +189,23 @@ export default function Sidebar({
         </>
       ) : null}
 
+      {panelOpen && !layersPanelOpen && activeTab === "s1" ? (
+        <Sentinel1Panel
+          token={token}
+          projectId={projectId}
+          loading={loading}
+          mapLayers={mapLayers}
+          recorteLayerId={recorteLayerId}
+          setRecorteLayerId={setRecorteLayerId}
+          stackMode={stackMode}
+          setStackMode={setStackMode}
+          onOpenPreproGallery={onOpenPreproGallery}
+          onOpenPreproClusterViz={onOpenPreproClusterViz}
+          recortePipelineBusy={recortePipelineBusy}
+          onS1GrdRecortes={onS1GrdRecortes}
+        />
+      ) : null}
+
       {panelOpen && !layersPanelOpen && activeTab === "cargar" ? (
         <UploadPanel
           token={token}
@@ -183,6 +225,7 @@ export default function Sidebar({
           setDownloadSource={setDownloadSource}
           mapLayers={mapLayers}
           s2Download={s2Download}
+          s1Download={s1Download}
         />
       ) : null}
 
@@ -199,6 +242,10 @@ export default function Sidebar({
           recortePipelineBusy={recortePipelineBusy}
           indexStacksBusy={indexStacksBusy}
           visualIndexGalleryKick={visualIndexGalleryKick}
+          recorteLayerId={recorteLayerId}
+          setRecorteLayerId={setRecorteLayerId}
+          preproGalleryKick={preproGalleryKick}
+          preproClusterVizKick={preproClusterVizKick}
           onS2L2aRecortes={onS2L2aRecortes}
           onS2IndexStacks={onS2IndexStacks}
           clusterElbowLoading={clusterElbowLoading}

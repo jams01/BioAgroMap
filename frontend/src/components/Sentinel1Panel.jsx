@@ -1,0 +1,324 @@
+import { useEffect, useState } from "react";
+import api, { formatApiErrorDetail, setAuthToken } from "../api";
+
+function formatFileSize(bytes) {
+  if (bytes == null || !Number.isFinite(Number(bytes))) return "";
+  const n = Number(bytes);
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+export default function Sentinel1Panel({
+  token,
+  projectId,
+  loading,
+  mapLayers,
+  recorteLayerId,
+  setRecorteLayerId,
+  stackMode,
+  setStackMode,
+  onOpenPreproGallery,
+  onOpenPreproClusterViz,
+  recortePipelineBusy,
+  onS1GrdRecortes,
+}) {
+  const vectorLayers = mapLayers.filter((l) => l.kind === "vector");
+  const busy = loading || recortePipelineBusy;
+
+  /** Capas vectoriales del proyecto (BD), no solo las pintadas en el mapa — alinea el AOI con el shapefile elegido. */
+  const [serverVectorLayers, setServerVectorLayers] = useState([]);
+
+  const [s1ModalOpen, setS1ModalOpen] = useState(false);
+  const [s1Inventory, setS1Inventory] = useState(null);
+  const [s1InventoryLoading, setS1InventoryLoading] = useState(false);
+  const [s1Error, setS1Error] = useState("");
+  const [s1Selected, setS1Selected] = useState(() => new Set());
+
+  useEffect(() => {
+    setS1ModalOpen(false);
+    setS1Inventory(null);
+    setS1Error("");
+    setS1Selected(new Set());
+  }, [projectId]);
+
+  useEffect(() => {
+    if (!projectId || !token) {
+      setServerVectorLayers([]);
+      return undefined;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        setAuthToken(token);
+        const r = await api.get(`/layers/${projectId}`);
+        if (cancelled) return;
+        const rows = Array.isArray(r.data) ? r.data : [];
+        setServerVectorLayers(rows);
+      } catch {
+        if (!cancelled) setServerVectorLayers([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, token]);
+
+  const polygonOptions =
+    serverVectorLayers.length > 0
+      ? serverVectorLayers.map((l) => ({ id: l.id, name: l.name }))
+      : vectorLayers
+          .filter((l) => l.serverId != null && Number.isFinite(Number(l.serverId)))
+          .map((l) => ({ id: Number(l.serverId), name: l.name }));
+
+  function openS1InventoryModal() {
+    if (!projectId || !token) return;
+    setS1ModalOpen(true);
+    setS1Inventory(null);
+    setS1Error("");
+    setS1Selected(new Set());
+    void loadS1Inventory();
+  }
+
+  async function loadS1Inventory() {
+    if (!projectId || !token) return;
+    setS1InventoryLoading(true);
+    setS1Error("");
+    try {
+      setAuthToken(token);
+      const r = await api.get(`/raster/project-sentinel1-inventory/${projectId}`);
+      setS1Inventory(r.data);
+    } catch (e) {
+      setS1Error(formatApiErrorDetail(e));
+    } finally {
+      setS1InventoryLoading(false);
+    }
+  }
+
+  function toggleS1Product(key) {
+    const k = String(key).trim();
+    if (!k) return;
+    setS1Selected((prev) => {
+      const next = new Set(prev);
+      if (next.has(k)) next.delete(k);
+      else next.add(k);
+      return next;
+    });
+  }
+
+  async function runRecorteFromModal() {
+    const paths = [...s1Selected];
+    const layerId = recorteLayerId ? Number(recorteLayerId) : undefined;
+    const ok = await onS1GrdRecortes?.(layerId, paths);
+    if (ok) {
+      setS1ModalOpen(false);
+      setS1Selected(new Set());
+    }
+  }
+
+  return (
+    <>
+      {(!token || !projectId) ? (
+        <div className="warn-msg">Primero crea cuenta y proyecto en Admin.</div>
+      ) : null}
+
+      <label>
+        1. Polígonos para recortar (shapefile / lote del proyecto)
+        <select
+          value={recorteLayerId}
+          onChange={(e) => setRecorteLayerId(e.target.value)}
+          disabled={busy}
+        >
+          <option value="">Todos los lotes del proyecto (unión)</option>
+          {polygonOptions.map((l) => (
+            <option key={l.id} value={String(l.id)}>
+              {l.name}
+            </option>
+          ))}
+        </select>
+        <span className="l2a-downloads-hint" style={{ display: "block", marginTop: 6 }}>
+          El recorte usa el polígono de la capa elegida (o la unión de todas las capas vectoriales del proyecto en
+          servidor). Solo se procesan los productos Sentinel-1 que marques en la lista.
+        </span>
+      </label>
+
+      <button
+        type="button"
+        className="s1-list-open-btn"
+        onClick={() => void openS1InventoryModal()}
+        disabled={busy || !projectId || !token}
+      >
+        Listar archivos en descargas
+      </button>
+
+      <label>
+        2) Visualización
+        <select
+          value={stackMode}
+          onChange={(e) => setStackMode(e.target.value)}
+          disabled={busy}
+        >
+          <option value="visual-rgb">Visual RGB (serie temporal)</option>
+          <option value="visual-index">Visual índices (serie temporal)</option>
+          <option value="visual-cluster">Visual cluster</option>
+        </select>
+      </label>
+      <button
+        type="button"
+        onClick={() => {
+          if (stackMode === "visual-cluster") {
+            void onOpenPreproClusterViz?.();
+          } else {
+            onOpenPreproGallery?.();
+          }
+        }}
+        disabled={!projectId || !token || loading}
+      >
+        {stackMode === "visual-rgb"
+          ? "Abrir galería RGB (serie temporal)"
+          : stackMode === "visual-index"
+            ? "Abrir galería de índices (serie temporal)"
+            : "Abrir visualización de clusters GMM"}
+      </button>
+
+      {s1ModalOpen ? (
+        <div
+          className="index-modal-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="s1-downloads-modal-title"
+          onClick={() => setS1ModalOpen(false)}
+        >
+          <div className="index-modal l2a-downloads-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="index-modal-header">
+              <h3 id="s1-downloads-modal-title">Archivos Sentinel-1 en descargas</h3>
+              <button
+                type="button"
+                className="index-modal-close"
+                onClick={() => setS1ModalOpen(false)}
+                aria-label="Cerrar"
+              >
+                ×
+              </button>
+            </div>
+            <div className="index-modal-body l2a-downloads-body">
+              {s1InventoryLoading ? <p className="l2a-downloads-status">Cargando inventario…</p> : null}
+              {s1Error ? <p className="rgb-gallery-error">{s1Error}</p> : null}
+              {!s1InventoryLoading && s1Inventory ? (
+                <>
+                  <p className="l2a-downloads-hint">
+                    Carpeta escaneada: <code>{s1Inventory.downloads_dir}</code>
+                  </p>
+                  {!s1Inventory.exists ? (
+                    <p className="l2a-downloads-empty">
+                      La carpeta <code>Sentinel1</code> no existe aún o no es accesible. Descarga GRD IW desde la pestaña
+                      Cargar.
+                    </p>
+                  ) : (
+                    <>
+                      {(() => {
+                        const zipRows = s1Inventory.zip_l2a || [];
+                        const safeRows = s1Inventory.safe_folders || [];
+                        const other = s1Inventory.other_top_level || [];
+                        const hasAny = zipRows.length > 0 || safeRows.length > 0;
+                        return (
+                          <>
+                            <p className="l2a-downloads-intro">
+                              Marca los productos a recortar (subset espacial por el polígono de la opción 1; equivalente
+                              operacional a SNAP Raster / Subset / Spatial subset con polígono). Salida en{" "}
+                              <code>recortes/S1/</code> (GeoTIFF VV+VH, 2 bandas).
+                            </p>
+                            <ul className="l2a-downloads-list">
+                              {zipRows.map((z) => (
+                                <li key={`zip:${z.name}`}>
+                                  <label className="l2a-downloads-row">
+                                    <input
+                                      type="checkbox"
+                                      checked={s1Selected.has(z.name)}
+                                      onChange={() => toggleS1Product(z.name)}
+                                    />
+                                    <span className="l2a-downloads-kind">ZIP</span>
+                                    <span className="l2a-downloads-name" title={z.name}>
+                                      {z.name}
+                                      {z.weak_match ? (
+                                        <span className="l2a-downloads-weak">
+                                          {" "}
+                                          (nombre poco típico para GRD IW)
+                                        </span>
+                                      ) : null}
+                                    </span>
+                                    {z.size_bytes != null ? (
+                                      <span className="l2a-downloads-size">{formatFileSize(z.size_bytes)}</span>
+                                    ) : null}
+                                  </label>
+                                </li>
+                              ))}
+                              {safeRows.map((name) => (
+                                <li key={`safe:${name}`}>
+                                  <label className="l2a-downloads-row">
+                                    <input
+                                      type="checkbox"
+                                      checked={s1Selected.has(name)}
+                                      onChange={() => toggleS1Product(name)}
+                                    />
+                                    <span className="l2a-downloads-kind">.SAFE</span>
+                                    <span className="l2a-downloads-name" title={name}>
+                                      {name}
+                                    </span>
+                                  </label>
+                                </li>
+                              ))}
+                            </ul>
+                            {!hasAny ? (
+                              <p className="l2a-downloads-empty">
+                                No hay carpetas <code>.SAFE</code> ni archivos <code>.zip</code> GRD en esta carpeta.
+                              </p>
+                            ) : null}
+                            {other.length > 0 ? (
+                              <p className="l2a-downloads-other">Otros en el primer nivel: {other.join(", ")}</p>
+                            ) : null}
+                          </>
+                        );
+                      })()}
+                    </>
+                  )}
+                </>
+              ) : null}
+              <div className="l2a-downloads-actions">
+                <button type="button" className="rgb-gallery-btn-secondary" onClick={() => setS1ModalOpen(false)}>
+                  Cerrar
+                </button>
+                <button
+                  type="button"
+                  className="rgb-gallery-btn-secondary"
+                  disabled={s1InventoryLoading}
+                  onClick={() => void loadS1Inventory()}
+                >
+                  Actualizar lista
+                </button>
+                <button
+                  type="button"
+                  className="rgb-gallery-btn-primary"
+                  disabled={
+                    busy ||
+                    !projectId ||
+                    !token ||
+                    s1Selected.size === 0 ||
+                    s1InventoryLoading ||
+                    !s1Inventory?.exists
+                  }
+                  title={
+                    s1Selected.size === 0 ? "Selecciona al menos un producto" : undefined
+                  }
+                  onClick={() => void runRecorteFromModal()}
+                >
+                  Ejecutar recorte
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </>
+  );
+}

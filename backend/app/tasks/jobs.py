@@ -146,12 +146,12 @@ def download_sentinel2(
     start_date_str: str,
     end_date_str: str,
     output_dir: str,
-    copernicus_user: str,
-    copernicus_password: str,
     raster_layer_id: int,
     db_url: str,
 ) -> dict:
-    from app.services.sentinel2 import search_and_download_monthly
+    from app.services.sentinel2 import get_copernicus_credentials, search_and_download_monthly
+
+    copernicus_user, copernicus_password = get_copernicus_credentials()
 
     def progress_cb(current: int, total: int, message: str) -> None:
         pct = int((current / max(total, 1)) * 100)
@@ -224,6 +224,104 @@ def download_sentinel2(
         db.close()
     except Exception:
         logger.exception("Error updating raster metadata after S2 download")
+
+    self.update_state(state="SUCCESS", meta={"progress": 100, "message": "Terminado", "phase": "completed"})
+    return result
+
+
+@celery_app.task(name="tasks.download_sentinel1", bind=True)
+def download_sentinel1(
+    self,
+    wkt: str,
+    start_date_str: str,
+    end_date_str: str,
+    project_downloads_root: str,
+    raster_layer_id: int,
+    db_url: str,
+) -> dict:
+    from pathlib import Path
+
+    from app.services.sentinel2 import get_copernicus_credentials
+    from app.services.sentinel1 import search_filter_and_download
+
+    copernicus_user, copernicus_password = get_copernicus_credentials()
+
+    def progress_cb(current: int, total: int, message: str) -> None:
+        pct = int((current / max(total, 1)) * 100)
+        self.update_state(
+            state="PROGRESS",
+            meta={"progress": pct, "message": message, "phase": "downloading"},
+        )
+        _update_raster_sentinel_status(
+            db_url,
+            raster_layer_id,
+            {"progress": pct, "progress_message": message, "status": "downloading"},
+        )
+
+    self.update_state(state="PROGRESS", meta={"progress": 0, "message": "Iniciando Sentinel-1…", "phase": "downloading"})
+    start = date.fromisoformat(start_date_str)
+    end = date.fromisoformat(end_date_str)
+
+    try:
+        result = search_filter_and_download(
+            wkt,
+            start,
+            end,
+            Path(project_downloads_root),
+            copernicus_user,
+            copernicus_password,
+            progress_callback=progress_cb,
+        )
+    except Exception as exc:
+        logger.exception("Sentinel-1 download failed")
+        _update_raster_sentinel_status(
+            db_url,
+            raster_layer_id,
+            {
+                "status": "failed",
+                "error": str(exc),
+                "progress": 0,
+                "progress_message": f"Error: {exc}",
+            },
+        )
+        raise
+
+    try:
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+        from sqlalchemy.orm.attributes import flag_modified
+
+        from app.models.models import RasterLayer
+
+        engine = create_engine(db_url)
+        Session = sessionmaker(bind=engine)
+        db = Session()
+        raster = db.query(RasterLayer).filter(RasterLayer.id == raster_layer_id).first()
+        if raster:
+            meta = {
+                **(raster.raster_metadata or {}),
+                "status": "completed",
+                "total_downloaded": result["total_downloaded"],
+                "total_size_mb": result["total_size_mb"],
+                "progress": 100,
+                "progress_message": result.get("summary_message") or "Descarga Sentinel-1 terminada",
+                "selected_relative_orbit": result.get("selected_relative_orbit"),
+                "selected_orbit_direction": result.get("selected_orbit_direction"),
+                "selected_pass_short": result.get("selected_pass_short"),
+                "date_range_start": result.get("date_range_start"),
+                "date_range_end": result.get("date_range_end"),
+                "csv_path": result.get("csv_path"),
+                "sentinel1_root": result.get("sentinel1_root"),
+                "product_paths": result.get("product_paths") or [],
+            }
+            if result.get("sentinel1_root"):
+                raster.file_path = str(result["sentinel1_root"])
+            raster.raster_metadata = meta
+            flag_modified(raster, "raster_metadata")
+            db.commit()
+        db.close()
+    except Exception:
+        logger.exception("Error updating raster metadata after Sentinel-1 download")
 
     self.update_state(state="SUCCESS", meta={"progress": 100, "message": "Terminado", "phase": "completed"})
     return result
@@ -458,7 +556,240 @@ def s2_l2a_recortes_pipeline(
                 if extract_dir:
                     shutil.rmtree(extract_dir, ignore_errors=True)
 
-        return {"ok": True, "processed": len(results), "results": results, "errors": errors}
+        return {
+            "ok": True,
+            "processed": len(results),
+            "results": results,
+            "errors": errors,
+            "pipeline": "s2_l2a",
+        }
+    finally:
+        db.close()
+
+
+@celery_app.task(name="tasks.s1_grd_recortes_pipeline")
+def s1_grd_recortes_pipeline(
+    tenant_id: int,
+    project_id: int,
+    project_name: str,
+    layer_id: int | None,
+    db_url: str,
+    product_paths: list[str],
+) -> dict:
+    """
+    Por cada producto Sentinel-1 (.SAFE o .zip bajo ``Sentinel1/``): apila VV+VH, recorte al polígono
+    (subset espacial equivalente a SNAP), salida en ``recortes/S1/`` y capa raster.
+    """
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from app.api.v1.helpers import _tenant_storage, project_downloads_dir
+    from app.models.models import Layer, RasterLayer
+    from app.services.project_geometry import wkt_union_from_project_layers
+    from app.services.raster_geo import bounds_wgs84_from_path
+    from app.services.s2_composites import s2_acquisition_date_label
+    from app.services.sentinel1_recorte import s1_safe_spatial_subset_to_recorte, s1_sort_key_from_safe_stem
+    from app.services.sentinel_safe import safe_extract_zip
+
+    engine = create_engine(db_url)
+    Session = sessionmaker(bind=engine)
+    db = Session()
+    try:
+        wkt = wkt_union_from_project_layers(db, project_id, tenant_id, layer_id)
+        if not wkt:
+            return {"ok": False, "error": "no_wkt", "message": "No hay polígono en el proyecto.", "pipeline": "s1_grd"}
+
+        aoi_layer_name: str | None = None
+        if layer_id is not None:
+            lyr_aoi = (
+                db.query(Layer)
+                .filter(Layer.id == layer_id, Layer.project_id == project_id, Layer.tenant_id == tenant_id)
+                .first()
+            )
+            if lyr_aoi:
+                aoi_layer_name = lyr_aoi.name
+
+        sentinel1_root = project_downloads_dir(tenant_id, project_id, project_name) / "Sentinel1"
+        sentinel1_resolved = sentinel1_root.resolve()
+        if not sentinel1_root.is_dir():
+            return {
+                "ok": False,
+                "error": "no_sentinel1_dir",
+                "message": f"No existe la carpeta Sentinel-1: {sentinel1_root}",
+                "pipeline": "s1_grd",
+            }
+
+        raw_paths = [str(x).strip().replace("\\", "/") for x in (product_paths or []) if str(x).strip()]
+        if not raw_paths:
+            return {
+                "ok": False,
+                "error": "no_selection",
+                "message": "No se indicaron productos (.SAFE o .zip) a recortar.",
+                "pipeline": "s1_grd",
+            }
+
+        def _resolve_under_s1(rel: str) -> Path | None:
+            if not rel or rel.startswith("/") or ".." in rel.split("/"):
+                return None
+            full = (sentinel1_root / rel).resolve()
+            try:
+                full.relative_to(sentinel1_resolved)
+            except ValueError:
+                return None
+            return full
+
+        rasters_dir = _tenant_storage(tenant_id, project_id, "rasters")
+        recortes_root = _tenant_storage(tenant_id, project_id, "recortes") / "S1"
+        results: list[dict] = []
+        errors: list[str] = []
+
+        for rel in raw_paths:
+            path = _resolve_under_s1(rel)
+            if path is None:
+                errors.append(f"{rel}: ruta inválida o fuera de Sentinel1/")
+                continue
+            if not path.exists():
+                errors.append(f"{rel}: no existe")
+                continue
+
+            extract_dir: Path | None = None
+            safe_dir: Path | None = None
+            try:
+                if path.is_file() and path.suffix.lower() == ".zip":
+                    pack_ex = uuid.uuid4().hex
+                    extract_dir = rasters_dir / f"s1_recorte_{pack_ex}"
+                    safe_extract_zip(path, extract_dir)
+                    candidates = [
+                        p
+                        for p in extract_dir.rglob("*")
+                        if p.is_dir() and p.name.upper().endswith(".SAFE")
+                    ]
+                    if not candidates:
+                        errors.append(f"{path.name}: no se encontró carpeta .SAFE tras extraer")
+                        continue
+                    candidates.sort(key=lambda p: len(p.parts))
+                    safe_dir = candidates[0]
+                elif path.is_dir() and path.name.upper().endswith(".SAFE"):
+                    safe_dir = path
+                else:
+                    errors.append(f"{rel}: no es .zip ni carpeta .SAFE")
+                    continue
+
+                assert safe_dir is not None
+                work = rasters_dir / f"s1_work_{uuid.uuid4().hex[:12]}"
+                clip_out, clip_diag = s1_safe_spatial_subset_to_recorte(safe_dir, wkt, recortes_root, work)
+                shutil.rmtree(work, ignore_errors=True)
+
+                stem = safe_dir.name
+                if stem.upper().endswith(".SAFE"):
+                    stem = stem[:-5]
+                s1_sort_key = s1_sort_key_from_safe_stem(stem)
+                date_label = s2_acquisition_date_label(stem)
+                m = re.search(r"_(20\d{2})(\d{2})(\d{2})T", stem.upper())
+                if m:
+                    y, mo, dd = m.group(1), m.group(2), m.group(3)
+                    name_layer = f"{dd}/{mo}/{y}_S1_clip"
+                else:
+                    name_layer = f"S1_clip_{stem[:24]}"
+
+                clip_cog = clip_out.with_name(clip_out.stem + "_cog.tif")
+                meta = {
+                    "source_name": rel,
+                    "status": "processing",
+                    "cog_ready": False,
+                    "s1_grd_recorte": True,
+                    "s1_iw_grd_vv_vh": True,
+                    "s1_sort_key": s1_sort_key,
+                    "s1_date_label": date_label,
+                    "composite_kind": "true_color",
+                    "preview_rgb_bands": [1, 2, 2],
+                    "bands_display_note": "Vista mapa: R=VV, G=VH, B=VH (backscatter)",
+                    "subset_note": "Recorte espacial por polígono (SNAP Read→Subset→Terrain-Correction→Write → *_recorte_TC.tif si hay gpt; si no, rasterio → *_recorte.tif).",
+                    "recorte_rel_path": "S1",
+                    "recorte_storage_layout": "recortes/S1",
+                    "from_zip": path.suffix.lower() == ".zip",
+                    "s1_clip_engine": clip_diag.get("clip_engine"),
+                    "snap_gpt_attempted": bool(clip_diag.get("snap_gpt_attempted")),
+                    "snap_gpt_ok": bool(clip_diag.get("snap_ok")),
+                    "aoi_layer_id": layer_id,
+                    "aoi_layer_name": aoi_layer_name,
+                    "aoi_mode": "single_vector_layer" if layer_id else "union_all_project_vectors",
+                }
+                se = clip_diag.get("snap_error")
+                if se:
+                    meta["snap_subset_error"] = str(se)[:800]
+                bds = bounds_wgs84_from_path(clip_out)
+                if bds:
+                    meta["bounds_wgs84"] = list(bds)
+
+                r_one = RasterLayer(
+                    project_id=project_id,
+                    tenant_id=tenant_id,
+                    name=name_layer,
+                    file_path=str(clip_out),
+                    cog_path=str(clip_cog),
+                    raster_metadata=meta,
+                )
+                db.add(r_one)
+                db.commit()
+                db.refresh(r_one)
+                apply_raster_cog(str(clip_out), str(clip_cog), r_one.id)
+                results.append(
+                    {
+                        "stem": stem,
+                        "layer_id": r_one.id,
+                        "file": str(clip_out),
+                        "clip_engine": clip_diag.get("clip_engine"),
+                        "snap_ok": bool(clip_diag.get("snap_ok")),
+                    }
+                )
+            except Exception as exc:
+                logger.exception("s1_grd_recortes item failed: %s", rel)
+                errors.append(f"{rel}: {exc}")
+                db.rollback()
+            finally:
+                if extract_dir:
+                    shutil.rmtree(extract_dir, ignore_errors=True)
+
+        def _s1_err_polygon_outside_scene(msg: str) -> bool:
+            low = (msg or "").lower()
+            return any(
+                k in low
+                for k in (
+                    "no intersecta la extensión",
+                    "no intersecta la escena",
+                    "ventana vacía",
+                    "sin píxeles en el recorte",
+                )
+            )
+
+        polygon_outside_scene = bool(errors) and any(_s1_err_polygon_outside_scene(e) for e in errors)
+        if len(results) > 0:
+            user_message = f"Listo: {len(results)} recorte(s) guardado(s) en recortes/S1/."
+        elif polygon_outside_scene:
+            user_message = (
+                "El polígono del proyecto no está dentro de la imagen (o esa escena Sentinel-1 no cubre el lote) "
+                "para uno o más productos. Prueba otra fecha/órbita o comprueba el vector y el CRS."
+            )
+        elif errors:
+            user_message = "Proceso terminado sin recortes nuevos; revisa el detalle por producto."
+        else:
+            user_message = "No se procesó ningún producto (sin selección o rutas inválidas)."
+
+        return {
+            "ok": True,
+            "processed": len(results),
+            "results": results,
+            "errors": errors,
+            "pipeline": "s1_grd",
+            "polygon_outside_scene": polygon_outside_scene,
+            "user_message": user_message,
+            "aoi": {
+                "layer_id": layer_id,
+                "layer_name": aoi_layer_name,
+                "mode": "single_vector_layer" if layer_id else "union_all_project_vectors",
+            },
+        }
     finally:
         db.close()
 

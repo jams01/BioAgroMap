@@ -125,6 +125,67 @@ def _scan_l2a_products_in_dir(root: Path) -> dict:
     return out
 
 
+def _looks_like_sentinel1_product_zip_filename(name: str) -> bool:
+    u = name.upper()
+    if not u.endswith(".ZIP"):
+        return False
+    return "S1" in u and ("IW_GRD" in u or "IW_GRDM" in u or "GRDH" in u)
+
+
+def _scan_sentinel1_products_in_dir(sentinel1_root: Path) -> dict:
+    """
+    Inventario bajo ``…/downloads/<slug>/Sentinel1/``: carpetas ``*.SAFE`` (incluye
+    subcarpetas p. ej. ``YYYY/MM/`` de descargas antiguas) y ZIP GRD IW en el primer nivel.
+    """
+    out: dict = {
+        "downloads_dir": str(sentinel1_root.resolve()),
+        "exists": sentinel1_root.is_dir(),
+        "zip_l2a": [],
+        "safe_folders": [],
+        "other_top_level": [],
+    }
+    if not sentinel1_root.is_dir():
+        return out
+
+    safe_rel_set: set[str] = set()
+    try:
+        for p in sorted(sentinel1_root.rglob("*")):
+            if not p.is_dir():
+                continue
+            if not p.name.upper().endswith(".SAFE"):
+                continue
+            try:
+                rel = p.resolve().relative_to(sentinel1_root.resolve()).as_posix()
+            except ValueError:
+                continue
+            if rel:
+                safe_rel_set.add(rel)
+        out["safe_folders"] = sorted(safe_rel_set)
+
+        for p in sorted(sentinel1_root.iterdir()):
+            if p.name.startswith("."):
+                continue
+            if p.is_file():
+                if p.suffix.lower() == ".zip":
+                    try:
+                        sz = p.stat().st_size
+                    except OSError:
+                        sz = 0
+                    entry: dict = {"name": p.name, "size_bytes": sz}
+                    if not _looks_like_sentinel1_product_zip_filename(p.name):
+                        entry["weak_match"] = True
+                    out["zip_l2a"].append(entry)
+                else:
+                    out["other_top_level"].append(p.name)
+            elif p.is_dir():
+                if p.name.upper().endswith(".SAFE"):
+                    continue
+                out["other_top_level"].append(p.name + "/")
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return out
+
+
 def _raster_chronological_sort_key(raster: RasterLayer) -> str:
     """Clave ISO YYYY-MM-DD para ordenar recortes S2 y otros rasters por fecha de escena."""
     meta = raster.raster_metadata or {}
@@ -295,6 +356,25 @@ def project_downloads_inventory(
         root = _safe_path_under_project(pr, subpath)
     out = _scan_l2a_products_in_dir(root)
     out["source_subpath"] = None if subpath is None else subpath
+    return out
+
+
+@router.get("/raster/project-sentinel1-inventory/{project_id}")
+def project_sentinel1_inventory(
+    project_id: int,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(tenant_from_jwt),
+):
+    """
+    Lista productos Sentinel-1 (carpetas ``*.SAFE`` bajo ``Sentinel1/``, cualquier profundidad;
+    ZIP GRD en el primer nivel) en ``downloads/<slug>/Sentinel1/``.
+    """
+    project = db.query(Project).filter(Project.id == project_id, Project.tenant_id == tenant_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    root = project_downloads_dir(tenant_id, project_id, project.name) / "Sentinel1"
+    out = _scan_sentinel1_products_in_dir(root)
+    out["source"] = "sentinel-1"
     return out
 
 

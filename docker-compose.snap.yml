@@ -1,0 +1,36 @@
+# Montaje de **ESA SNAP** (Earth Observation Toolbox) en el worker Celery — recorte Sentinel-1 con ``gpt``.
+#
+# === Linux: no confundir con la tienda "Snap" (Snapcraft) ===
+# - ``/snap`` en el host suele ser el sistema de paquetes Squashfs de Ubuntu (NO es ESA SNAP).
+# - ``~/snap/`` son datos de apps instaladas con ``snap install``; la app **esa-snap** vive bajo
+#   ``~/snap/esa-snap/<revisión>/``. Eso SÍ puede ser ESA SNAP, pero la ruta cambia por revisión.
+# - **Recomendado:** instalador oficial desde https://step.esa.int/main/download/snap-download/
+#   (instalación típica **/opt/snap** con ``bin/gpt``, ``etc/``, ``jre/``). Monta esa carpeta en Docker.
+#
+# Comprueba en el host: ``readlink -f "$(command -v gpt)"`` — ``SNAP_HOST_MOUNT`` debe ser el
+# directorio **raíz del producto** (el que contiene ``bin/gpt``, no solo ``bin``).
+#
+# 1) En .env: SNAP_HOST_MOUNT=/opt/snap   (o la ruta real de tu instalación ESA).
+# 2) Arranque: docker compose -f docker-compose.yml -f docker-compose.snap.yml up -d worker
+#
+# Variables útiles (también en .env):
+#   SNAP_GPT_PATH=/opt/snap/bin/gpt
+#   SNAP_GPT_CACHE=4G
+#   SNAP_JAVA_OPTS=-Xmx8G
+#
+# ``snap_auxdata`` → /root/.snap del contenedor (auxdata/cache ESA entre reinicios; no es la tienda Snap).
+
+services:
+  worker:
+    volumes:
+      - ${SNAP_HOST_MOUNT:?SNAP_HOST_MOUNT_missing_in_env}:/opt/snap:ro
+      - snap_auxdata:/root/.snap
+    environment:
+      SNAP_GPT_PATH: ${SNAP_GPT_PATH:-/opt/snap/bin/gpt}
+      SNAP_HOME: /opt/snap
+      ESA_SNAP_HOME: /opt/snap
+      # Sin recorte rasterio de respaldo: solo subset SNAP (falla la tarea si gpt no completa).
+      S1_RECORTE_SNAP_ONLY: ${S1_RECORTE_SNAP_ONLY:-1}
+
+volumes:
+  snap_auxdata:

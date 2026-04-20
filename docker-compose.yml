@@ -41,6 +41,8 @@ services:
       - postgres
       - redis
 
+  # SNAP (subset S1): ver ``docker-compose.snap.yml`` y arranque con
+  #   docker compose -f docker-compose.yml -f docker-compose.snap.yml up -d worker
   worker:
     image: python:3.11-slim
     working_dir: /app

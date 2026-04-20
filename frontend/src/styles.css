@@ -456,17 +456,39 @@ body {
 }
 
 .top-tabs {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr) auto;
-  gap: 6px;
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: stretch;
+  gap: 5px;
+  min-width: 0;
 }
 
-.top-tabs button {
-  padding: 8px 6px;
+.top-tabs > button {
+  padding: 8px 5px;
   border: 1px solid #d6d6d6;
   background: #f3f4f7;
   cursor: pointer;
   border-radius: 6px;
+  font-size: 12px;
+  flex: 1 1 0;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.top-tabs > button.top-tab-s1 {
+  flex: 0 0 auto;
+  min-width: 0;
+  padding: 8px 4px;
+  max-width: 2.5rem;
+  overflow: visible;
+  text-overflow: clip;
+}
+
+.top-tabs > button.tab-toggle {
+  flex: 0 0 auto;
+  min-width: min-content;
 }
 
 .top-tabs button.active {
@@ -1202,13 +1224,17 @@ body {
   }
 
   .top-tabs {
-    grid-template-columns: repeat(3, 1fr) auto;
-    font-size: 12px;
+    gap: 4px;
   }
 
-  .top-tabs button {
-    padding: 6px 4px;
+  .top-tabs > button {
+    padding: 6px 3px;
     font-size: 11px;
+  }
+
+  .top-tabs > button.top-tab-s1 {
+    padding: 6px 3px;
+    max-width: 2.25rem;
   }
 
   .brand-logo {
@@ -1235,8 +1261,22 @@ body {
   }
 
   .top-tabs {
-    grid-template-columns: repeat(2, 1fr);
-    gap: 4px;
+    gap: 3px;
+  }
+
+  .top-tabs > button {
+    font-size: 10px;
+    padding: 6px 2px;
+  }
+
+  .top-tabs > button.top-tab-s1 {
+    padding: 6px 2px;
+    max-width: 2rem;
+  }
+
+  .top-tabs .tab-toggle {
+    font-size: 10px;
+    padding: 6px 5px;
   }
 
   .brand-logo {
@@ -1492,6 +1532,15 @@ body {
   z-index: 1;
   cursor: pointer;
   flex-shrink: 0;
+}
+
+.l2a-downloads-row.l2a-downloads-row--readonly {
+  grid-template-columns: 3.75rem minmax(0, 1fr) auto;
+  cursor: default;
+}
+
+.s1-list-open-btn {
+  width: 100%;
 }
 
 .l2a-downloads-kind {

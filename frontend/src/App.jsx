@@ -44,10 +44,17 @@ export default function App() {
   const [stackMode, setStackMode] = useState("visual-rgb");
   const [targetRasterId, setTargetRasterId] = useState("");
   const [s2Download, setS2Download] = useState(null);
+  const [s1Download, setS1Download] = useState(null);
   const [recorteTaskId, setRecorteTaskId] = useState("");
+  /** "s1" | "s2" | "" — para mensajes mientras Celery ejecuta el recorte. */
+  const [recorteKind, setRecorteKind] = useState("");
   const [indexStacksTaskId, setIndexStacksTaskId] = useState("");
   /** Incrementa para abrir la galería «Visual índices» al terminar la estimación. */
   const [visualIndexGalleryKick, setVisualIndexGalleryKick] = useState(0);
+  const [sidebarTab, setSidebarTab] = useState("admin");
+  const [recorteLayerId, setRecorteLayerId] = useState("");
+  const [preproGalleryKick, setPreproGalleryKick] = useState(0);
+  const [preproClusterVizKick, setPreproClusterVizKick] = useState(0);
   const [clusterElbowLoading, setClusterElbowLoading] = useState(false);
   const [clusterGmmLoading, setClusterGmmLoading] = useState(false);
   const [clusterElbowResults, setClusterElbowResults] = useState(null);
@@ -55,8 +62,11 @@ export default function App() {
 
   useEffect(() => {
     setS2Download(null);
+    setS1Download(null);
     setClusterElbowResults(null);
     setClusterGmmResults(null);
+    setRecorteLayerId("");
+    setRecorteKind("");
   }, [projectId]);
 
   useEffect(() => {
@@ -124,6 +134,56 @@ export default function App() {
   }, [s2Download?.rasterId, s2Download?.ui_status, projectId, token]);
 
   useEffect(() => {
+    if (!s1Download || s1Download.ui_status !== "downloading" || !projectId || !token) {
+      return undefined;
+    }
+    const rasterId = s1Download.rasterId;
+    const poll = async () => {
+      try {
+        setAuthToken(token);
+        const r = await api.get(`/preprocess/sentinel-status/${projectId}/${rasterId}`);
+        const st = r.data.ui_status;
+        setS1Download((prev) => {
+          if (!prev || prev.rasterId !== rasterId) return prev;
+          return {
+            ...prev,
+            progress: r.data.progress ?? prev.progress,
+            message: r.data.message ?? prev.message,
+            ui_status: st,
+            totalDownloaded: r.data.total_downloaded ?? prev.totalDownloaded,
+            totalSizeMb: r.data.total_size_mb ?? prev.totalSizeMb,
+            selectedRelativeOrbit: r.data.selected_relative_orbit ?? prev.selectedRelativeOrbit,
+            selectedPassShort: r.data.selected_pass_short ?? prev.selectedPassShort,
+            dateRangeStart: r.data.date_range_start ?? prev.dateRangeStart,
+            dateRangeEnd: r.data.date_range_end ?? prev.dateRangeEnd,
+            csvPath: r.data.csv_path ?? prev.csvPath,
+          };
+        });
+        if (st === "completed") {
+          const orb = r.data.selected_relative_orbit != null ? ` Órbita relativa ${r.data.selected_relative_orbit}` : "";
+          const pass = r.data.selected_pass_short ? `, paso ${r.data.selected_pass_short}` : "";
+          const dr =
+            r.data.date_range_start && r.data.date_range_end
+              ? ` Rango adquisición: ${r.data.date_range_start} → ${r.data.date_range_end}.`
+              : "";
+          setMessage(
+            `Sentinel-1: descarga terminada.${orb}${pass}.${dr}${
+              r.data.total_downloaded != null ? ` Productos: ${r.data.total_downloaded}.` : ""
+            }`
+          );
+        } else if (st === "failed") {
+          setMessage(`Sentinel-1: ${r.data.message || "Error"}`);
+        }
+      } catch (_) {
+        /* ignore transient errors */
+      }
+    };
+    poll();
+    const iv = setInterval(poll, 2000);
+    return () => clearInterval(iv);
+  }, [s1Download?.rasterId, s1Download?.ui_status, projectId, token]);
+
+  useEffect(() => {
     if (!recorteTaskId || !token || !projectId) {
       return undefined;
     }
@@ -135,19 +195,61 @@ export default function App() {
         if (cancelled) return;
         if (r.data.ready && r.data.state === "SUCCESS") {
           const result = r.data.result || {};
+          const pipeline = result.pipeline || "s2_l2a";
           const n = result.processed ?? 0;
           const errs = (result.errors || []).filter(Boolean);
-          const errTxt = errs.length ? ` Detalle: ${errs.join("; ")}` : "";
+          const errTxt = errs.length ? ` Detalle por producto: ${errs.join(" | ")}` : "";
           setRecorteTaskId("");
-          setMessage(
-            n > 0
-              ? `Recortes L2A: ${n} GeoTIFF de 6 bandas (B02,B03,B04,B05,B08,B11; B5/B11 a 10 m) añadido(s) como capa(s).${errTxt}`
-              : `Pipeline terminado sin nuevas capas.${errTxt || " Comprueba inventario L2A y polígono."}`
-          );
+          setRecorteKind("");
           await selectProject(projectId, token);
+          if (pipeline === "s1_grd") {
+            const aoi = result.aoi || {};
+            const aoiTxt =
+              aoi.layer_name != null && String(aoi.layer_name).trim()
+                ? ` Polígono: «${aoi.layer_name}».`
+                : aoi.mode === "union_all_project_vectors"
+                  ? " Polígono: unión de todos los lotes del proyecto."
+                  : "";
+            const engines = [
+              ...new Set((result.results || []).map((x) => x && x.clip_engine).filter(Boolean)),
+            ];
+            const engTxt = engines.length ? ` Motor: ${engines.join(", ")}.` : "";
+            const um = (result.user_message || "").trim();
+            const polyOut = result.polygon_outside_scene === true;
+            let head = "Proceso de recorte Sentinel-1 terminado. ";
+            if (um) {
+              head += um;
+            } else if (polyOut) {
+              head +=
+                "El polígono no está dentro de la imagen (o la escena no cubre el lote) para al menos un producto.";
+            } else if (n > 0) {
+              head += `${n} GeoTIFF en recortes/S1/.`;
+            } else {
+              head += "Sin recortes nuevos.";
+            }
+            setMessage(`${head}${aoiTxt}${engTxt}${errTxt}`.trim());
+          } else {
+            setMessage(
+              n > 0
+                ? `Proceso de recorte L2A terminado. ${n} GeoTIFF de 6 bandas añadido(s) como capa(s).${errTxt}`
+                : `Proceso de recorte L2A terminado. Sin nuevas capas.${errTxt || " Comprueba inventario L2A y polígono."}`
+            );
+          }
         } else if (r.data.ready && r.data.state === "FAILURE") {
           setRecorteTaskId("");
-          setMessage(`Error en pipeline L2A: ${r.data.error || "fallo"}`);
+          setRecorteKind("");
+          setMessage(`Proceso de recorte terminado con error: ${r.data.error || "fallo"}`);
+        } else if (!r.data.ready) {
+          const st = r.data.state || "PENDING";
+          const label =
+            recorteKind === "s1"
+              ? "Recorte Sentinel-1"
+              : recorteKind === "s2"
+                ? "Recorte Sentinel-2 L2A"
+                : "Recorte";
+          setMessage(
+            `${label} en curso (Celery: ${st}). Al terminar se mostrará el resultado aquí. Tarea: ${recorteTaskId}`
+          );
         }
       } catch (_) {
         /* ignorar errores transitorios al consultar Celery */
@@ -332,7 +434,10 @@ export default function App() {
       });
       for (const raster of rastersRes.data) {
         const m = raster.metadata || {};
-        if (m.source === "sentinel-2" && m.type === "download") {
+        if (
+          (m.source === "sentinel-2" || m.source === "sentinel-1") &&
+          m.type === "download"
+        ) {
           continue;
         }
         if (isLegacyS2ZipBandRaster(m)) continue;
@@ -354,7 +459,8 @@ export default function App() {
       }
       const visibleRasters = rastersRes.data.filter((r) => {
         const m = r.metadata || {};
-        if (m.source === "sentinel-2" && m.type === "download") return false;
+        if ((m.source === "sentinel-2" || m.source === "sentinel-1") && m.type === "download")
+          return false;
         if (isLegacyS2ZipBandRaster(m)) return false;
         return true;
       });
@@ -628,7 +734,7 @@ export default function App() {
     }
   }
 
-  async function preprocessDownload(startDate, endDate, layerId) {
+  async function preprocessDownload(startDate, endDate, layerId, s1AoiFile) {
     if (!token || !projectId) {
       setMessage("Error: debes iniciar sesion y crear proyecto.");
       return;
@@ -637,6 +743,31 @@ export default function App() {
     setMessage("");
     try {
       setAuthToken(token);
+      if (downloadSource === "sentinel-1") {
+        const fd = new FormData();
+        fd.append("project_id", String(projectId));
+        fd.append("start_date", startDate);
+        fd.append("end_date", endDate);
+        if (layerId) {
+          fd.append("layer_id", String(layerId));
+        }
+        if (s1AoiFile) {
+          fd.append("aoi_file", s1AoiFile);
+        }
+        const res = await api.post("/preprocess/sentinel1-download", fd);
+        if (res.data.status === "downloading") {
+          setS1Download({
+            rasterId: res.data.raster_layer_id,
+            taskId: res.data.task_id,
+            progress: 0,
+            message: "Iniciando descarga Sentinel-1 (GRD IW, Copernicus)…",
+            ui_status: "downloading",
+          });
+          setMessage(`Descarga Sentinel-1 en curso (registro #${res.data.raster_layer_id})`);
+        }
+        return;
+      }
+
       const body = {
         project_id: Number(projectId),
         source: downloadSource,
@@ -709,8 +840,56 @@ export default function App() {
         body.layer_id = n;
       }
       const res = await api.post("/preprocess/s2-l2a-recortes", body);
+      setRecorteKind("s2");
       setRecorteTaskId(res.data.task_id);
-      setMessage(`Pipeline L2A en curso (tarea ${res.data.task_id}). Puede tardar si hay varios productos.`);
+      setMessage(
+        `Recorte L2A en cola (tarea ${res.data.task_id}). Seguimiento: estado Celery cada pocos segundos hasta terminar.`
+      );
+      return true;
+    } catch (error) {
+      setMessage(`Error: ${formatApiErrorDetail(error)}`);
+      return false;
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function runS1GrdRecortes(layerId, productPaths) {
+    if (!token || !projectId) {
+      setMessage("Error: inicia sesion y selecciona un proyecto.");
+      return false;
+    }
+    const paths = Array.isArray(productPaths)
+      ? [...new Set(productPaths.map((s) => String(s).trim()).filter(Boolean))]
+      : [];
+    if (paths.length === 0) {
+      setMessage("Selecciona al menos un producto Sentinel-1 (.zip o ruta .SAFE) en la lista.");
+      return false;
+    }
+    setLoading(true);
+    setMessage("");
+    try {
+      setAuthToken(token);
+      const body = {
+        project_id: Number(projectId),
+        product_paths: paths,
+      };
+      if (layerId != null && layerId !== "") {
+        const n = Number(layerId);
+        if (!Number.isFinite(n) || !Number.isInteger(n) || n < 1) {
+          setMessage(
+            "Error: el polígono elegido no tiene ID de capa válido en el servidor. Vuelve a cargar el proyecto o sube de nuevo el lote."
+          );
+          return false;
+        }
+        body.layer_id = n;
+      }
+      const res = await api.post("/preprocess/sentinel1-recortes", body);
+      setRecorteKind("s1");
+      setRecorteTaskId(res.data.task_id);
+      setMessage(
+        `Recorte Sentinel-1 en cola (tarea ${res.data.task_id}). Se avisará al terminar (polígono fuera de escena, SNAP, etc.).`
+      );
       return true;
     } catch (error) {
       setMessage(`Error: ${formatApiErrorDetail(error)}`);
@@ -839,6 +1018,20 @@ export default function App() {
   return (
     <div className="layout">
       <Sidebar
+        activeTab={sidebarTab}
+        setActiveTab={setSidebarTab}
+        recorteLayerId={recorteLayerId}
+        setRecorteLayerId={setRecorteLayerId}
+        preproGalleryKick={preproGalleryKick}
+        preproClusterVizKick={preproClusterVizKick}
+        onOpenPreproGallery={() => {
+          setSidebarTab("prepro");
+          setPreproGalleryKick((k) => k + 1);
+        }}
+        onOpenPreproClusterViz={() => {
+          setSidebarTab("prepro");
+          setPreproClusterVizKick((k) => k + 1);
+        }}
         token={token}
         email={email}
         setEmail={setEmail}
@@ -881,6 +1074,7 @@ export default function App() {
         indexStacksBusy={!!indexStacksTaskId}
         visualIndexGalleryKick={visualIndexGalleryKick}
         onS2L2aRecortes={runS2L2aRecortes}
+        onS1GrdRecortes={runS1GrdRecortes}
         onS2IndexStacks={runS2IndexStacks}
         clusterElbowLoading={clusterElbowLoading}
         clusterGmmLoading={clusterGmmLoading}
@@ -890,6 +1084,7 @@ export default function App() {
         onClusterGmm={runClusterGmm}
         onLoadPersistedClusterGmm={loadPersistedClusterGmm}
         s2Download={s2Download}
+        s1Download={s1Download}
       />
       <MapView
         mapRef={mapRef}

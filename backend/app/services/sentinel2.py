@@ -43,6 +43,23 @@ def get_copernicus_token(username: str, password: str) -> str:
     return r.json()["access_token"]
 
 
+def get_copernicus_credentials() -> tuple[str, str]:
+    """
+    Usuario y contraseña CDSE (Copernicus Data Space Ecosystem) desde la configuración.
+    Mismas credenciales para descarga Sentinel-2 (``search_and_download_monthly``) y Sentinel-1
+    (token OAuth + OData): variables ``COPERNICUS_USER`` y ``COPERNICUS_PASSWORD`` en ``.env``.
+    """
+    from app.core.config import settings
+
+    u = (settings.copernicus_user or "").strip()
+    p = settings.copernicus_password or ""
+    if not u or not p:
+        raise RuntimeError(
+            "Credenciales Copernicus no configuradas. Defina COPERNICUS_USER y COPERNICUS_PASSWORD."
+        )
+    return u, p
+
+
 def _product_covers_area(product: dict, aoi_geom) -> bool:
     """Check if product footprint covers >= 75% of the area of interest."""
     try:

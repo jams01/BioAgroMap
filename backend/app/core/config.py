@@ -62,8 +62,19 @@ class Settings(BaseSettings):
     ai_service_url: str = "http://localhost:8001"
     storage_path: str = Field(default_factory=_default_storage_path)
     max_upload_mb: int = 4096  # Sentinel-2 ZIP; variable de entorno MAX_UPLOAD_MB tiene prioridad
-    copernicus_user: str = ""
-    copernicus_password: str = ""
+    copernicus_user: str = Field(
+        default="",
+        description="CDSE (Copernicus Data Space); misma cuenta para descarga Sentinel-2 y Sentinel-1.",
+    )
+    copernicus_password: str = Field(default="", description="Contraseña CDSE (Sentinel-2 / Sentinel-1).")
+    snap_gpt_path: str = Field(
+        default="",
+        description=(
+            "Ruta al ``gpt`` de **ESA SNAP** (p. ej. /opt/snap/bin/gpt). Vacío: autodetección priorizando "
+            "/opt/snap y rutas ESA frente a un ``gpt`` genérico en PATH (evita confusión con la tienda "
+            "Snap de Linux). Sin SNAP, recorte S1 con rasterio."
+        ),
+    )
     model_config = _settings_model_config()
 
 

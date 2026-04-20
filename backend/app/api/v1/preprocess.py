@@ -1,12 +1,13 @@
 import json
 import re
+import tempfile
 import uuid
 from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 import rasterio
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile
 from sqlalchemy.orm import Session
 
 from app.api.deps import tenant_from_jwt
@@ -16,6 +17,7 @@ from app.api.v1.helpers import (
     _tenant_storage,
     is_legacy_s2_zip_band_raster,
     project_downloads_dir,
+    validate_upload_size,
 )
 from app.services.raster_geo import render_raster_preview_png
 from app.core.config import settings
@@ -26,6 +28,7 @@ from app.schemas.schemas import (
     CropRequest,
     DownloadRequest,
     IndicesRequest,
+    S1GrdRecorteRequest,
     S2IndexStacksRequest,
     S2L2aRecorteRequest,
     StackRequest,
@@ -81,8 +84,6 @@ def preprocess_download(payload: DownloadRequest, db: Session = Depends(get_db),
             payload.start_date,
             payload.end_date,
             str(out_dir),
-            settings.copernicus_user,
-            settings.copernicus_password,
             raster.id,
             settings.database_url,
         )
@@ -125,6 +126,130 @@ def preprocess_download(payload: DownloadRequest, db: Session = Depends(get_db),
     return {"status": "ok", "raster_layer_id": raster.id}
 
 
+@router.post("/preprocess/sentinel1-download")
+async def preprocess_sentinel1_download(
+    project_id: int = Form(...),
+    start_date: str = Form(...),
+    end_date: str = Form(...),
+    layer_id: str | None = Form(None),
+    aoi_file: UploadFile | None = File(None),
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(tenant_from_jwt),
+):
+    """
+    Descarga Sentinel-1 GRD IW (VV+VH) desde Copernicus (STAC + OData).
+    AOI: capa vectorial del proyecto (layer_id) o archivo GeoJSON / ZIP shapefile (aoi_file).
+    """
+    from datetime import date as date_cls
+
+    project = db.query(Project).filter(Project.id == project_id, Project.tenant_id == tenant_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    if not settings.copernicus_user or not settings.copernicus_password:
+        raise HTTPException(status_code=500, detail="Copernicus credentials not configured")
+
+    lid = None
+    if layer_id is not None and str(layer_id).strip() != "":
+        try:
+            lid = int(layer_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="layer_id inválido")
+        if lid < 1:
+            raise HTTPException(status_code=400, detail="layer_id inválido")
+
+    has_aoi_upload = bool(aoi_file and getattr(aoi_file, "filename", None))
+    if not has_aoi_upload and lid is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Indica una capa vectorial (paso 1) o sube un AOI (GeoJSON o ZIP shapefile).",
+        )
+
+    try:
+        d0 = date_cls.fromisoformat(start_date.strip())
+        d1 = date_cls.fromisoformat(end_date.strip())
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Fechas inválidas; use YYYY-MM-DD")
+
+    if d1 < d0:
+        raise HTTPException(status_code=400, detail="La fecha final debe ser >= fecha inicial")
+
+    wkt: str | None = None
+    if has_aoi_upload:
+        await validate_upload_size(aoi_file)
+        ext = Path(aoi_file.filename).suffix.lower()
+        allowed = {".geojson", ".json", ".zip"}
+        if ext not in allowed:
+            raise HTTPException(status_code=400, detail="AOI: use .geojson, .json o .zip (shapefile)")
+
+        raw = await aoi_file.read()
+        with tempfile.NamedTemporaryFile(suffix=ext, prefix="aoi_s1_", delete=False) as tf:
+            tf.write(raw)
+            tmp_path = Path(tf.name)
+        try:
+            from app.services.aoi_vector import geometry_wkt_from_vector_path
+
+            wkt, _meta = geometry_wkt_from_vector_path(tmp_path)
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
+    if wkt is None and lid is not None:
+        from app.services.project_geometry import wkt_union_from_project_layers
+
+        wkt = wkt_union_from_project_layers(db, project_id, tenant_id, lid)
+        if not wkt:
+            raise HTTPException(status_code=400, detail="No se pudo obtener geometría desde la capa vectorial.")
+
+    if not wkt:
+        raise HTTPException(status_code=400, detail="AOI vacío o inválido.")
+
+    out_dir = project_downloads_dir(tenant_id, project_id, project.name)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    raster = RasterLayer(
+        project_id=project_id,
+        tenant_id=tenant_id,
+        name=f"Sentinel-1 GRD IW ({start_date} a {end_date})",
+        file_path=str(out_dir / "Sentinel1"),
+        cog_path=None,
+        raster_metadata={
+            "source": "sentinel-1",
+            "type": "download",
+            "status": "downloading",
+            "start_date": start_date,
+            "end_date": end_date,
+            "layer_id": lid,
+        },
+    )
+    db.add(raster)
+    db.commit()
+    db.refresh(raster)
+
+    from app.tasks.jobs import download_sentinel1
+
+    async_result = download_sentinel1.delay(
+        wkt,
+        start_date.strip(),
+        end_date.strip(),
+        str(out_dir),
+        raster.id,
+        settings.database_url,
+    )
+    raster.raster_metadata = {
+        **(raster.raster_metadata or {}),
+        "celery_task_id": async_result.id,
+    }
+    db.commit()
+
+    return {
+        "status": "downloading",
+        "raster_layer_id": raster.id,
+        "task_id": async_result.id,
+        "output_dir": str(out_dir),
+        "sentinel1_subdir": str(out_dir / "Sentinel1"),
+    }
+
+
 @router.get("/preprocess/sentinel-status/{project_id}/{raster_id}")
 def sentinel_download_status(
     project_id: int,
@@ -155,13 +280,21 @@ def sentinel_download_status(
     message = meta.get("progress_message") or "Preparando descarga..."
 
     if db_status == "completed":
-        return {
+        done = {
             "ui_status": "completed",
             "progress": 100,
             "message": meta.get("progress_message") or "Descarga terminada",
             "total_downloaded": meta.get("total_downloaded"),
             "total_size_mb": meta.get("total_size_mb"),
         }
+        if meta.get("source") == "sentinel-1":
+            done["selected_relative_orbit"] = meta.get("selected_relative_orbit")
+            done["selected_orbit_direction"] = meta.get("selected_orbit_direction")
+            done["selected_pass_short"] = meta.get("selected_pass_short")
+            done["date_range_start"] = meta.get("date_range_start")
+            done["date_range_end"] = meta.get("date_range_end")
+            done["csv_path"] = meta.get("csv_path")
+        return done
 
     if db_status == "failed":
         return {
@@ -186,7 +319,7 @@ def sentinel_download_status(
                 message = str(cm)
 
         if celery_state == "SUCCESS" or (ar.ready() and ar.successful()):
-            return {
+            done = {
                 "ui_status": "completed",
                 "progress": 100,
                 "message": meta.get("progress_message") or "Descarga terminada",
@@ -194,6 +327,14 @@ def sentinel_download_status(
                 "total_size_mb": meta.get("total_size_mb"),
                 "celery_state": celery_state,
             }
+            if meta.get("source") == "sentinel-1":
+                done["selected_relative_orbit"] = meta.get("selected_relative_orbit")
+                done["selected_orbit_direction"] = meta.get("selected_orbit_direction")
+                done["selected_pass_short"] = meta.get("selected_pass_short")
+                done["date_range_start"] = meta.get("date_range_start")
+                done["date_range_end"] = meta.get("date_range_end")
+                done["csv_path"] = meta.get("csv_path")
+            return done
 
         if celery_state == "FAILURE" or (ar.ready() and ar.failed()):
             err = str(ar.result) if ar.result else "Error en la tarea"
@@ -842,6 +983,62 @@ def preprocess_cluster(
         with rasterio.open(out_path, "w", **profile) as dst:
             dst.write(classified, 1)
     return {"status": "ok", "clusters": k}
+
+
+@router.post("/preprocess/sentinel1-recortes")
+def preprocess_sentinel1_recortes(
+    payload: S1GrdRecorteRequest,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(tenant_from_jwt),
+):
+    """
+    Por cada producto Sentinel-1 (.SAFE o .zip bajo ``Sentinel1/``): apila VV+VH, recorta al polígono
+    (subset espacial equivalente a SNAP Raster/Subset/Polygon) y guarda GeoTIFF en ``recortes/S1/``.
+    """
+    from app.tasks.jobs import s1_grd_recortes_pipeline
+
+    project = db.query(Project).filter(Project.id == payload.project_id, Project.tenant_id == tenant_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    if payload.layer_id is not None:
+        found = (
+            db.query(Layer)
+            .filter(
+                Layer.id == payload.layer_id,
+                Layer.project_id == payload.project_id,
+                Layer.tenant_id == tenant_id,
+            )
+            .first()
+        )
+        if not found:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No existe la capa vectorial {payload.layer_id} en este proyecto.",
+            )
+
+    paths = [str(x).strip().replace("\\", "/") for x in (payload.product_paths or []) if str(x).strip()]
+    if not paths:
+        raise HTTPException(status_code=400, detail="Indica al menos un producto (ruta bajo Sentinel1/).")
+
+    try:
+        async_result = s1_grd_recortes_pipeline.delay(
+            tenant_id,
+            payload.project_id,
+            project.name,
+            payload.layer_id,
+            settings.database_url,
+            paths,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "No se pudo encolar el recorte Sentinel-1. Comprueba Redis y el worker Celery. "
+                f"Detalle: {exc!s}"
+            ),
+        ) from exc
+    return {"status": "queued", "task_id": async_result.id}
 
 
 @router.post("/preprocess/s2-l2a-recortes")

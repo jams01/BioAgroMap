@@ -18,9 +18,11 @@ export default function UploadPanel({
   setDownloadSource,
   mapLayers,
   s2Download,
+  s1Download,
 }) {
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
+  const [s1AoiFile, setS1AoiFile] = useState(null);
   const [selectedLayerId, setSelectedLayerId] = useState("");
   const [uploadedLayerId, setUploadedLayerId] = useState("");
   const [loteMode, setLoteMode] = useState("existing");
@@ -30,10 +32,15 @@ export default function UploadPanel({
 
   const activeLayerId = loteMode === "existing" ? selectedLayerId : uploadedLayerId;
   const isSentinel2 = downloadSource === "sentinel-2";
+  const isSentinel1 = downloadSource === "sentinel-1";
+  const sentinelDatesOk = !isSentinel2 && !isSentinel1 || (startDate && endDate);
+  const hasVectorForDownload = activeLayerId || (isSentinel1 && s1AoiFile);
   const downloadDisabled =
     loading || !projectId || !token ||
-    (isSentinel2 && (!startDate || !endDate)) ||
-    !activeLayerId;
+    !sentinelDatesOk ||
+    (isSentinel2 && !activeLayerId) ||
+    (isSentinel1 && !hasVectorForDownload) ||
+    (!isSentinel1 && !isSentinel2 && !activeLayerId);
 
   async function handleUploadLote() {
     const newLayerId = await onUploadLote();
@@ -44,9 +51,10 @@ export default function UploadPanel({
 
   function handleDownload() {
     onDownload(
-      isSentinel2 ? startDate : undefined,
-      isSentinel2 ? endDate : undefined,
-      activeLayerId
+      isSentinel2 || isSentinel1 ? startDate : undefined,
+      isSentinel2 || isSentinel1 ? endDate : undefined,
+      activeLayerId,
+      isSentinel1 ? s1AoiFile : undefined
     );
   }
 
@@ -135,7 +143,7 @@ export default function UploadPanel({
           <option value="drone">Drone</option>
         </select>
 
-        {isSentinel2 && (
+        {(isSentinel2 || isSentinel1) && (
           <div className="date-range-fields">
             <label>
               Fecha inicio
@@ -158,8 +166,26 @@ export default function UploadPanel({
           </div>
         )}
 
+        {isSentinel1 && (
+          <div className="hint-msg" style={{ marginTop: "0.5rem" }}>
+            <strong>AOI (opcional si ya usas la capa del paso 1):</strong> GeoJSON (
+            <code>.geojson</code>) o shapefile en <code>.zip</code>. Si lo subes aquí, tiene prioridad
+            sobre la capa seleccionada.
+            <input
+              type="file"
+              accept=".geojson,.json,.zip,application/json,application/zip"
+              onChange={(e) => setS1AoiFile(e.target.files?.[0] || null)}
+              disabled={loading}
+              style={{ display: "block", marginTop: "0.35rem" }}
+            />
+            {s1AoiFile ? (
+              <span className="status-msg">Archivo AOI: {s1AoiFile.name}</span>
+            ) : null}
+          </div>
+        )}
+
         <button onClick={handleDownload} disabled={downloadDisabled}>
-          {isSentinel2 ? "Descargar Sentinel-2" : "Ejecutar descarga"}
+          {isSentinel2 ? "Descargar Sentinel-2" : isSentinel1 ? "Descargar Sentinel-1 (GRD IW)" : "Ejecutar descarga"}
         </button>
 
         {isSentinel2 && s2Download && s2Download.ui_status === "downloading" && (
@@ -189,6 +215,41 @@ export default function UploadPanel({
           <div className="s2-progress s2-progress-err" role="alert">
             <strong>Error</strong>
             <span className="s2-progress-msg">{s2Download.message || "Fallo la descarga"}</span>
+          </div>
+        )}
+
+        {isSentinel1 && s1Download && s1Download.ui_status === "downloading" && (
+          <div className="s2-progress" role="status" aria-live="polite">
+            <div className="s2-progress-label">Descarga Sentinel-1 en curso</div>
+            <div className="s2-progress-bar-wrap">
+              <div
+                className="s2-progress-bar-fill"
+                style={{ width: `${Math.min(100, Math.max(0, s1Download.progress || 0))}%` }}
+              />
+            </div>
+            <div className="s2-progress-msg">{s1Download.message || "Procesando…"}</div>
+          </div>
+        )}
+        {isSentinel1 && s1Download && s1Download.ui_status === "completed" && (
+          <div className="s2-progress s2-progress-done" role="status">
+            <strong>Terminado</strong>
+            <span className="s2-progress-msg">
+              {s1Download.message || "Descarga completada"}
+              {s1Download.selectedRelativeOrbit != null
+                ? ` · Órbita relativa ${s1Download.selectedRelativeOrbit}${
+                    s1Download.selectedPassShort ? ` (${s1Download.selectedPassShort})` : ""
+                  }`
+                : ""}
+              {s1Download.totalDownloaded != null
+                ? ` · ${s1Download.totalDownloaded} producto(s)`
+                : ""}
+            </span>
+          </div>
+        )}
+        {isSentinel1 && s1Download && s1Download.ui_status === "failed" && (
+          <div className="s2-progress s2-progress-err" role="alert">
+            <strong>Error</strong>
+            <span className="s2-progress-msg">{s1Download.message || "Fallo la descarga"}</span>
           </div>
         )}
       </fieldset>

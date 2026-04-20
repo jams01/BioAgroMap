@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import json
+import logging
+import re
 import zipfile
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 from sqlalchemy.orm import Session
 
@@ -58,6 +62,65 @@ def layer_to_geojson(layer: Layer) -> dict | None:
     return None
 
 
+def _epsg_from_geojson_crs(geo: dict) -> int | None:
+    """EPSG numérico desde propiedad legacy ``crs`` de GeoJSON (RFC antiguo)."""
+    crs = geo.get("crs")
+    if not crs or not isinstance(crs, dict):
+        return None
+    if crs.get("type") != "name":
+        return None
+    name = str(crs.get("properties", {}).get("name", ""))
+    m = re.search(r"(?:EPSG|epsg)[\s:]*([0-9]{4,5})", name, re.I)
+    if m:
+        return int(m.group(1))
+    m = re.search(r"urn:ogc:def:crs:EPSG::([0-9]{4,5})", name, re.I)
+    if m:
+        return int(m.group(1))
+    return None
+
+
+def _geometries_wgs84_from_geojson(geojson_data: dict) -> list:
+    """
+    Extrae geometrías Shapely en **EPSG:4326**.
+
+    Si el GeoJSON declara ``crs`` (p. ej. UTM), reproyecta con GeoPandas. Sin ``crs``, se asume WGS84
+    (KML/KMZ y GeoJSON RFC 7946).
+    """
+    import geopandas as gpd
+    from shapely.geometry import shape
+
+    epsg = _epsg_from_geojson_crs(geojson_data)
+    raw = geojson_data.get("features")
+    if not raw:
+        g = geojson_data.get("geometry")
+        if isinstance(g, dict) and g.get("type"):
+            raw = [{"type": "Feature", "geometry": g, "properties": {}}]
+        else:
+            raw = []
+    geoms = []
+    for f in raw:
+        if not isinstance(f, dict):
+            continue
+        geom_dict = f.get("geometry") or f
+        if not isinstance(geom_dict, dict) or not geom_dict.get("type"):
+            continue
+        try:
+            geoms.append(shape(geom_dict))
+        except Exception:
+            continue
+    if not geoms:
+        return []
+    init = epsg if epsg is not None else 4326
+    try:
+        gdf = gpd.GeoDataFrame(geometry=geoms, crs=f"EPSG:{init}")
+        if epsg is not None and epsg != 4326:
+            gdf = gdf.to_crs(4326)
+        return list(gdf.geometry)
+    except Exception as exc:
+        logger.warning("No se pudo normalizar CRS del GeoJSON (se asume WGS84): %s", exc)
+        return geoms
+
+
 def wkt_union_from_project_layers(
     db: Session,
     project_id: int,
@@ -76,7 +139,6 @@ def wkt_union_from_project_layers(
     if not layers:
         return None
 
-    from shapely.geometry import shape
     from shapely.ops import unary_union
 
     all_geoms = []
@@ -84,20 +146,15 @@ def wkt_union_from_project_layers(
         geojson_data = layer_to_geojson(layer)
         if not geojson_data:
             continue
-        features = geojson_data.get("features", [geojson_data])
-        for f in features:
-            geom_dict = f.get("geometry") or f
-            if not geom_dict or not geom_dict.get("type"):
-                continue
-            try:
-                all_geoms.append(shape(geom_dict))
-            except Exception:
-                continue
+        for gm in _geometries_wgs84_from_geojson(geojson_data):
+            all_geoms.append(gm)
 
     if not all_geoms:
         return None
 
     union = unary_union(all_geoms)
+    if not union.is_valid:
+        union = union.buffer(0)
     if union.geom_type == "MultiPolygon" and len(union.geoms) == 1:
         union = union.geoms[0]
     return union.wkt

@@ -14,12 +14,14 @@ function isLegacyS2ZipBandRaster(meta) {
 function filterGalleryRasters(rows) {
   return rows.filter((r) => {
     const m = r.metadata || {};
-    if (m.source === "sentinel-2" && m.type === "download") return false;
+    if ((m.source === "sentinel-2" || m.source === "sentinel-1") && m.type === "download")
+      return false;
     if (isLegacyS2ZipBandRaster(m)) return false;
     if (!m.bounds_wgs84) return false;
     if (m.composite_kind === "false_color_nir") return false;
     return (
       m.s2_l2a_recorte ||
+      m.s1_grd_recorte ||
       m.s2_four_band_stack ||
       m.s2_six_band_stack ||
       m.composite_kind === "true_color"
@@ -33,7 +35,8 @@ function filterGalleryRasters(rows) {
 function filterSixBandStackRasters(rows) {
   return rows.filter((r) => {
     const m = r.metadata || {};
-    if (m.source === "sentinel-2" && m.type === "download") return false;
+    if ((m.source === "sentinel-2" || m.source === "sentinel-1") && m.type === "download")
+      return false;
     if (isLegacyS2ZipBandRaster(m)) return false;
     if (!m.bounds_wgs84) return false;
     if (m.composite_kind === "false_color_nir") return false;
