@@ -66,6 +66,24 @@ chmod +x scripts/setup_postgis_local.sh
 
 Este script instala PostgreSQL, habilita extensiones `postgis` y `postgis_raster`, crea base y aplica esquema.
 
+## Despliegue: Vercel (frontend) y Render (API + Celery)
+
+### Render (backend)
+
+1. En [Render](https://render.com): **New → Blueprint**, conecta este repositorio y deja que use `render.yaml` en la raíz.
+2. El blueprint crea Postgres, Redis (Key Value) y un servicio web `bioagromap-api` que ejecuta migraciones, **Celery y FastAPI en el mismo dyno** (así comparten el mismo filesystem local; en Render no se puede compartir un disco entre un web y un worker separados sin almacenamiento externo).
+3. Cuando el deploy termine, copia la URL pública del servicio (p. ej. `https://bioagromap-api.onrender.com`).
+4. Variables que puedes ajustar en el dashboard: `CORS_ORIGINS` (añade tu dominio de producción si no es `*.vercel.app`), `MAX_UPLOAD_MB`, `COPERNICUS_*` si usas descargas Sentinel, etc. `CORS_ORIGIN_REGEX` por defecto permite orígenes `https://…vercel.app` (incluye previews).
+
+### Vercel (frontend)
+
+1. **New Project** en [Vercel](https://vercel.com), mismo repositorio.
+2. **Root Directory**: `frontend` (importante: el `package.json` del cliente está ahí).
+3. **Environment variables** (Production y Preview): `VITE_API_URL` = la URL del API en Render **sin barra final** (p. ej. `https://bioagromap-api.onrender.com`). El cliente añade `/api/v1` automáticamente.
+4. `frontend/vercel.json` define la regla SPA para React Router (todas las rutas van a `index.html`).
+
+El microservicio de IA (`ai_service`) y Mapbox no forman parte de este blueprint; en local siguen en Docker Compose.
+
 ## Endpoints clave (`/api/v1`)
 
 - `POST /auth/register`

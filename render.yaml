@@ -1,0 +1,51 @@
+# Blueprint Render: Postgres + Redis + API (FastAPI + Celery en el mismo servicio para
+# compartir el mismo filesystem; en Render los discos no se comparten entre web y worker).
+# New → Blueprint en el dashboard y elige este repositorio.
+#
+# Después del deploy: en Vercel (carpeta frontend) define VITE_API_URL con la URL del API,
+# p. ej. https://bioagromap-api.onrender.com (sin barra final; el cliente añade /api/v1).
+
+databases:
+  - name: bioagromap-db
+    databaseName: bioagromap
+
+services:
+  - type: keyvalue
+    name: bioagromap-redis
+    ipAllowList:
+      - source: 0.0.0.0/0
+        description: render-network
+    plan: free
+    maxmemoryPolicy: noeviction
+
+  - type: web
+    name: bioagromap-api
+    runtime: python
+    region: oregon
+    plan: free
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: bash scripts/render_start.sh
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+      - key: ENV
+        value: production
+      - key: SECRET_KEY
+        generateValue: true
+      - key: DATABASE_URL
+        fromDatabase:
+          name: bioagromap-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          name: bioagromap-redis
+          type: keyvalue
+          property: connectionString
+      - key: CORS_ORIGIN_REGEX
+        value: "https://.*\\.vercel\\.app"
+      - key: CORS_ORIGINS
+        value: "http://localhost:5173,http://127.0.0.1:5173"
+      - key: MAX_UPLOAD_MB
+        value: "512"

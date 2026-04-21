@@ -58,6 +58,7 @@ class Settings(BaseSettings):
     refresh_token_expire_minutes: int = 60 * 24 * 7
     database_url: str = "postgresql+psycopg2://postgres:postgres@localhost:5432/bioagromap"
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000"
+    cors_origin_regex: str = ""
     redis_url: str = "redis://localhost:6379/0"
     ai_service_url: str = "http://localhost:8001"
     storage_path: str = Field(default_factory=_default_storage_path)

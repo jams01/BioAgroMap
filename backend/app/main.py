@@ -16,9 +16,11 @@ logger = logging.getLogger(__name__)
 # Schema managed by Alembic migrations (run: alembic upgrade head)
 
 app = FastAPI(title=settings.app_name)
+_cors_regex = settings.cors_origin_regex.strip() or None
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[o.strip() for o in settings.cors_origins.split(",") if o.strip()],
+    allow_origin_regex=_cors_regex,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
