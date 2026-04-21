@@ -919,3 +919,136 @@ def s2_index_stacks_pipeline(
         }
     finally:
         db.close()
+
+
+@celery_app.task(name="tasks.s1_sar_index_stacks_pipeline")
+def s1_sar_index_stacks_pipeline(
+    tenant_id: int,
+    project_id: int,
+    indices: list[str],
+    scene_vv_relpaths: list[str],
+    db_url: str,
+) -> dict:
+    """
+    Por cada índice SAR (RVI, RFDI, …): stack multibanda en ``s1indices/<INDICE>/``,
+    una banda por escena (orden cronológico), desde ``Sigma0_VV_db.img`` + ``Sigma0_VH_db.img`` en ``s1prepoceso/``.
+    """
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from app.api.v1.helpers import _tenant_storage
+    from app.models.models import RasterLayer
+    from app.services.s1_sar_indices import (
+        S1_SAR_STACKS_ROOT_NAME,
+        compute_sar_index_array,
+        discover_s1_prep_sar_scenes,
+        normalize_s1_sar_indices_requested,
+        read_vv_vh_pair_aligned,
+        write_s1_sar_multiband_stack,
+    )
+    from app.services.s2_vegetation_indices import yyyymmdd_range_str
+
+    engine = create_engine(db_url)
+    Session = sessionmaker(bind=engine)
+    db = Session()
+    outputs: dict[str, str] = {}
+    errors: list[dict[str, str]] = []
+
+    try:
+        prep_root = _tenant_storage(tenant_id, project_id, "s1prepoceso")
+        all_scenes = discover_s1_prep_sar_scenes(tenant_id, project_id)
+        if not all_scenes:
+            return {
+                "ok": False,
+                "error": "no_scenes",
+                "message": "No hay escenas VV+VH en s1prepoceso/ (pares Sigma0_VV_db.img y Sigma0_VH_db.img en la misma carpeta).",
+                "outputs": {},
+                "errors": [],
+            }
+
+        allowed = {str(p).strip().replace("\\", "/") for p in (scene_vv_relpaths or [])}
+        scenes = [s for s in all_scenes if s["scene_vv_relpath"] in allowed]
+        scenes.sort(key=lambda x: (x["sort_key"], x["scene_vv_relpath"]))
+        if not scenes:
+            return {
+                "ok": False,
+                "error": "no_matching_scenes",
+                "message": "Ninguna de las escenas seleccionadas coincide con pares VV+VH en s1prepoceso/.",
+                "outputs": {},
+                "errors": [],
+            }
+
+        index_keys = normalize_s1_sar_indices_requested(indices)
+        if not index_keys:
+            return {"ok": False, "error": "no_indices", "message": "Ningún índice SAR válido.", "outputs": {}, "errors": []}
+
+        s1idx_root = _tenant_storage(tenant_id, project_id, S1_SAR_STACKS_ROOT_NAME)
+
+        for idx_key in index_keys:
+            bands_stack: list = []
+            dates_used: list[str] = []
+            base_prof: dict | None = None
+
+            for sc in scenes:
+                vv_rel = sc["scene_vv_relpath"]
+                vh_rel = sc["scene_vh_relpath"]
+                vv_path = (prep_root / Path(vv_rel)).resolve()
+                vh_path = (prep_root / Path(vh_rel)).resolve()
+                if not vv_path.is_file() or not vh_path.is_file():
+                    errors.append({"scene": vv_rel, "index": idx_key, "error": "Archivo VV/VH no encontrado"})
+                    continue
+                try:
+                    vv_lin, vh_lin, prof = read_vv_vh_pair_aligned(vv_path, vh_path)
+                    arr = compute_sar_index_array(vv_lin, vh_lin, idx_key)
+                    if base_prof is None:
+                        base_prof = prof
+                    bands_stack.append(arr)
+                    dates_used.append(sc["sort_key"])
+                except Exception as exc:
+                    logger.warning("Escena omitida SAR %s [%s]: %s", vv_rel, idx_key, exc)
+                    errors.append({"scene": vv_rel, "index": idx_key, "error": str(exc)})
+
+            if not bands_stack or base_prof is None:
+                logger.error("Índice SAR %s: sin bandas válidas", idx_key)
+                continue
+
+            dir_out = s1idx_root / idx_key
+            dir_out.mkdir(parents=True, exist_ok=True)
+            dmin, dmax = yyyymmdd_range_str(dates_used)
+            out_path = dir_out / f"{idx_key}_{dmin}_{dmax}.tif"
+
+            try:
+                write_s1_sar_multiband_stack(out_path, bands_stack, base_prof, idx_key, dates_used)
+                outputs[idx_key] = str(out_path)
+                logger.info("Stack SAR %s guardado: %s (%s bandas)", idx_key, out_path, len(bands_stack))
+
+                for old in (
+                    db.query(RasterLayer)
+                    .filter(
+                        RasterLayer.project_id == project_id,
+                        RasterLayer.tenant_id == tenant_id,
+                    )
+                    .all()
+                ):
+                    om = old.raster_metadata or {}
+                    if om.get("s1_sar_index_stack") and om.get("s1_sar_index_key") == idx_key:
+                        for p in (old.file_path, old.cog_path):
+                            if p:
+                                try:
+                                    Path(p).unlink(missing_ok=True)
+                                except OSError:
+                                    pass
+                        db.delete(old)
+                db.commit()
+            except Exception as exc:
+                logger.exception("Fallo al escribir stack SAR %s", idx_key)
+                errors.append({"scene": "", "index": idx_key, "error": str(exc)})
+
+        return {
+            "ok": bool(outputs),
+            "outputs": outputs,
+            "errors": errors,
+            "scene_count": len(scenes),
+        }
+    finally:
+        db.close()

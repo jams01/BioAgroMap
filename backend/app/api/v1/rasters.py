@@ -21,7 +21,11 @@ from app.api.v1.helpers import (
 from app.core.config import settings
 from app.db.session import get_db
 from app.models.models import Project, RasterLayer
-from app.services.raster_geo import bounds_wgs84_from_path, render_raster_preview_png
+from app.services.raster_geo import (
+    bounds_wgs84_from_path,
+    render_raster_preview_png,
+    render_s1_vh_vv_ratio_preview_png,
+)
 from app.services.s2_composites import (
     s2_acquisition_date_label,
     s2_date_slug_for_filename,
@@ -712,6 +716,11 @@ def get_raster_preview(
         description="1 = aplicar paleta de índice (RdYlGn: rojo bajo → verde alto). 0 = sin paleta. "
         "Usar 1 solo en la galería «Visual NDVI/…»; el mapa y la galería RGB envían 0.",
     ),
+    s1_derived: str | None = Query(
+        None,
+        description="Sentinel-1 (VV+VH): vista derivada. vh_vv_ratio = cociente VH/VV en lineal "
+        "(log-scale + paleta RdYlGn). Ignora preview_rgb_bands.",
+    ),
     db: Session = Depends(get_db),
     tenant_id: int = Depends(tenant_from_jwt),
 ):
@@ -721,13 +730,26 @@ def get_raster_preview(
         raise HTTPException(status_code=404, detail="Raster file not found")
     try:
         meta = raster.raster_metadata or {}
-        rgb_override = (band, band, band) if band is not None else None
-        png = render_raster_preview_png(
-            path,
-            layer_metadata=meta,
-            rgb_bands_1based=rgb_override,
-            index_palette_request=index_palette == 1,
-        )
+        sd = (s1_derived or "").strip().lower()
+        if sd == "vh_vv_ratio":
+            png = render_s1_vh_vv_ratio_preview_png(path, layer_metadata=meta)
+        elif sd != "":
+            raise ValueError(f"s1_derived no reconocido: {s1_derived}")
+        elif band is not None:
+            rgb_override = (band, band, band)
+            png = render_raster_preview_png(
+                path,
+                layer_metadata=meta,
+                rgb_bands_1based=rgb_override,
+                index_palette_request=index_palette == 1,
+            )
+        else:
+            png = render_raster_preview_png(
+                path,
+                layer_metadata=meta,
+                rgb_bands_1based=None,
+                index_palette_request=index_palette == 1,
+            )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"No se pudo generar la vista previa: {exc}") from exc
     return Response(

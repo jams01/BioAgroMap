@@ -29,6 +29,8 @@ from app.schemas.schemas import (
     DownloadRequest,
     IndicesRequest,
     S1GrdRecorteRequest,
+    S1SarIndexStacksRequest,
+    S1SarTimeSeriesRequest,
     S2IndexStacksRequest,
     S2L2aRecorteRequest,
     StackRequest,
@@ -385,6 +387,209 @@ def _safe_relative_under(root: Path, p: Path) -> str | None:
         return None
 
 
+# Fecha de adquisición en nombres GRD IW: ...S1A_IW_GRDH_1SDV_20250111T102623...
+_S1_IW_GRDH_SCENE_DATE = re.compile(r"S1[A-Z]_IW_GRDH_1SDV_(\d{8})T", re.IGNORECASE)
+
+# Nombre de colormap matplotlib (clave API → nombre en colormaps)
+_S1_PREP_VV_PREVIEW_PALETTES: dict[str, str] = {
+    "spectral": "Spectral",
+    "jet": "jet",
+    "turbo": "turbo",
+}
+
+# ENVI/SNAP sigma0 en dB bajo s1prepoceso/
+_S1_PREP_SIGMA0_IMG: dict[str, str] = {
+    "vv": "Sigma0_VV_db.img",
+    "vh": "Sigma0_VH_db.img",
+}
+
+
+def _s1_prepoceso_sort_key_from_path(path: Path) -> str:
+    """Clave YYYY-MM-DD para ordenar; prioriza la fecha en el nombre de carpeta GRD."""
+    text = "/".join(path.parts)
+    m = _S1_IW_GRDH_SCENE_DATE.search(text)
+    if m:
+        ymd = m.group(1)
+        return f"{ymd[:4]}-{ymd[4:6]}-{ymd[6:8]}"
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime).date().isoformat()
+    except OSError:
+        return "1900-01-01"
+
+
+@router.get("/preprocess/s1-prepoceso-sigma0-vv-inventory/{project_id}")
+def get_s1_prepoceso_sigma0_vv_inventory(
+    project_id: int,
+    pol: str = Query(
+        "vv",
+        description="Polarización: vv → Sigma0_VV_db.img, vh → Sigma0_VH_db.img",
+    ),
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(tenant_from_jwt),
+):
+    """
+    Lista ``Sigma0_VV_db.img`` o ``Sigma0_VH_db.img`` bajo ``s1prepoceso/`` (SNAP/ENVI).
+    ``sort_key`` en formato ISO (YYYY-MM-DD) extraído de ``..._S1?_IW_GRDH_1SDV_YYYYMMDDTh...`` en la ruta.
+    """
+    project = db.query(Project).filter(Project.id == project_id, Project.tenant_id == tenant_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    p = str(pol or "vv").strip().lower()
+    if p not in _S1_PREP_SIGMA0_IMG:
+        raise HTTPException(status_code=400, detail="pol debe ser vv o vh")
+    basename = _S1_PREP_SIGMA0_IMG[p]
+
+    root = _tenant_storage(tenant_id, project_id, "s1prepoceso")
+    if not root.is_dir():
+        return {"items": [], "root_exists": False, "pol": p}
+
+    items: list[dict] = []
+    for path in sorted(root.rglob(basename)):
+        if not path.is_file() or path.name != basename:
+            continue
+        rel = _safe_relative_under(root, path)
+        if rel is None:
+            continue
+        sk = _s1_prepoceso_sort_key_from_path(path)
+        items.append(
+            {
+                "basename": path.name,
+                "relative_path": rel,
+                "sort_key": sk,
+            }
+        )
+    items.sort(key=lambda x: (x["sort_key"], x["relative_path"]))
+    return {"items": items, "root_exists": True, "pol": p}
+
+
+@router.get("/preprocess/s1-prepoceso-sigma0-vv-preview/{project_id}")
+def get_s1_prepoceso_sigma0_vv_preview(
+    project_id: int,
+    img_relpath: str | None = Query(
+        None,
+        alias="path",
+        description="Ruta relativa dentro de s1prepoceso/ hasta Sigma0_VV_db.img o Sigma0_VH_db.img",
+    ),
+    pol: str = Query(
+        "vv",
+        description="Debe coincidir con el archivo: vv → Sigma0_VV_db.img, vh → Sigma0_VH_db.img",
+    ),
+    palette: str = Query(
+        "spectral",
+        description="Paleta tipo JET/Spectral (matplotlib): spectral | jet | turbo",
+    ),
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(tenant_from_jwt),
+):
+    """PNG de una banda (sigma0 VV o VH en dB) desde ENVI en ``s1prepoceso/`` (paleta científica)."""
+    project = db.query(Project).filter(Project.id == project_id, Project.tenant_id == tenant_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    p = str(pol or "vv").strip().lower()
+    if p not in _S1_PREP_SIGMA0_IMG:
+        raise HTTPException(status_code=400, detail="pol debe ser vv o vh")
+    expected_name = _S1_PREP_SIGMA0_IMG[p]
+
+    if img_relpath is None or not str(img_relpath).strip():
+        raise HTTPException(status_code=400, detail="Indica path")
+
+    root = _tenant_storage(tenant_id, project_id, "s1prepoceso").resolve()
+    rel = Path(str(img_relpath).strip().replace("\\", "/"))
+    if rel.is_absolute() or ".." in rel.parts:
+        raise HTTPException(status_code=400, detail="Ruta relativa no válida")
+    img_path = (root / rel).resolve()
+    if not img_path.is_file() or not img_path.is_relative_to(root):
+        raise HTTPException(status_code=404, detail=f"{expected_name} no encontrado")
+    if img_path.name != expected_name:
+        raise HTTPException(
+            status_code=400,
+            detail=f"El archivo debe ser {expected_name} para pol={p}",
+        )
+
+    cmap_key = _S1_PREP_VV_PREVIEW_PALETTES.get(str(palette or "spectral").strip().lower())
+    if cmap_key is None:
+        allowed = ", ".join(sorted(_S1_PREP_VV_PREVIEW_PALETTES))
+        raise HTTPException(status_code=400, detail=f"palette inválida; use: {allowed}")
+
+    meta = {"preview_rgb_bands": [1, 1, 1], "index_preview_cmap": cmap_key}
+    try:
+        png = render_raster_preview_png(
+            img_path,
+            layer_metadata=meta,
+            index_palette_request=True,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"No se pudo generar la vista previa: {exc}") from exc
+    return Response(
+        content=png,
+        media_type="image/png",
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+        },
+    )
+
+
+@router.get("/preprocess/s1-prepoceso-sar-scenes-inventory/{project_id}")
+def get_s1_prep_sar_scenes_inventory(
+    project_id: int,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(tenant_from_jwt),
+):
+    """
+    Escenas con par ``Sigma0_VV_db.img`` + ``Sigma0_VH_db.img`` en ``s1prepoceso/`` (misma carpeta ``.data``).
+    Orden cronológico por fecha GRD en la ruta.
+    """
+    from app.services.s1_sar_indices import discover_s1_prep_sar_scenes
+
+    project = db.query(Project).filter(Project.id == project_id, Project.tenant_id == tenant_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    root = _tenant_storage(tenant_id, project_id, "s1prepoceso")
+    items = discover_s1_prep_sar_scenes(tenant_id, project_id)
+    return {"items": items, "root_exists": root.is_dir()}
+
+
+@router.post("/preprocess/s1-sar-index-stacks")
+def preprocess_s1_sar_index_stacks(
+    payload: S1SarIndexStacksRequest,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(tenant_from_jwt),
+):
+    """
+    Encola generación de stacks multibanda (una banda por escena, orden cronológico) por cada índice SAR.
+    Salida **solo** en ``s1indices/<INDICE>/`` del proyecto (no usa ``indices/`` de Sentinel-2).
+    """
+    from app.tasks.jobs import s1_sar_index_stacks_pipeline
+
+    project = db.query(Project).filter(Project.id == payload.project_id, Project.tenant_id == tenant_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    paths = [str(p).strip().replace("\\", "/") for p in payload.scene_vv_relpaths if str(p).strip()]
+    paths = list(dict.fromkeys(paths))
+    if not paths:
+        raise HTTPException(status_code=400, detail="Indica al menos una escena (ruta a Sigma0_VV_db.img)")
+
+    try:
+        async_result = s1_sar_index_stacks_pipeline.delay(
+            tenant_id,
+            payload.project_id,
+            payload.indices,
+            paths,
+            settings.database_url,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"No se pudo encolar la tarea de índices SAR. ¿Redis y worker activos? {exc!s}",
+        ) from exc
+    return {"status": "queued", "task_id": async_result.id}
+
+
 @router.get("/preprocess/recortes-inventory/{project_id}")
 def get_recortes_inventory(
     project_id: int,
@@ -570,6 +775,15 @@ def get_recorte_preview_disk(
     )
 
 
+_S1_SAR_INDEX_DIR_KEYS = frozenset({"RVI", "RFDI", "VV_VH", "VH_VV", "NRPB"})
+
+
+def _canonical_s1_sar_index_dir_name(raw: str) -> str | None:
+    """Carpeta bajo s1indices/ (índices SAR). Acepta capitalización distinta."""
+    u = raw.strip().upper().replace("/", "_")
+    return u if u in _S1_SAR_INDEX_DIR_KEYS else None
+
+
 def _canonical_index_dir_name(raw: str) -> str | None:
     """Carpeta bajo indices/ → clave estable (mismo criterio que el pipeline). Acepta cualquier capitalización."""
     u = raw.strip().upper()
@@ -688,6 +902,137 @@ def get_index_stack_preview_disk(
 
     first_seg = rel.parts[0] if rel.parts else ""
     index_key = _canonical_index_dir_name(first_seg) or first_seg
+    meta = {
+        "s2_index_stack": True,
+        "vegetation_index_key": index_key,
+        "preview_rgb_bands": [1, 1, 1],
+        "index_preview_cmap": "RdYlGn",
+    }
+    rgb_override = (band, band, band) if band is not None else None
+    try:
+        png = render_raster_preview_png(
+            tif_path,
+            layer_metadata=meta,
+            rgb_bands_1based=rgb_override,
+            index_palette_request=index_palette == 1,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"No se pudo generar la vista previa: {exc}") from exc
+    return Response(
+        content=png,
+        media_type="image/png",
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+        },
+    )
+
+
+@router.get("/preprocess/s1-sar-index-stacks-inventory/{project_id}")
+def get_s1_sar_index_stacks_inventory(
+    project_id: int,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(tenant_from_jwt),
+):
+    """Lista GeoTIFF multibanda en ``s1indices/<INDICE>/`` (stacks SAR por escena)."""
+    from app.services.s1_sar_indices import S1_SAR_STACKS_ROOT_NAME
+
+    project = db.query(Project).filter(Project.id == project_id, Project.tenant_id == tenant_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    root = _tenant_storage(tenant_id, project_id, S1_SAR_STACKS_ROOT_NAME)
+    if not root.is_dir():
+        return {"items": []}
+
+    items: list[dict] = []
+    seen_rel: set[str] = set()
+    for p in sorted(root.rglob("*.tif")):
+        if "_cog" in p.name.lower():
+            continue
+        if not p.is_file():
+            continue
+        rel = _safe_relative_under(root, p)
+        if rel is None or rel in seen_rel:
+            continue
+        parts = Path(rel).parts
+        if len(parts) < 2:
+            continue
+        key = _canonical_s1_sar_index_dir_name(parts[0])
+        if key is None:
+            continue
+        seen_rel.add(rel)
+        try:
+            with rasterio.open(p) as src:
+                bands = int(src.count)
+                tags = src.tags()
+        except Exception:
+            continue
+        dates: list[str] = []
+        jd = tags.get("BAND_DATES_JSON")
+        if isinstance(jd, str) and jd.strip():
+            try:
+                parsed = json.loads(jd)
+                if isinstance(parsed, list):
+                    dates = [str(x) for x in parsed]
+            except json.JSONDecodeError:
+                dates = []
+        items.append(
+            {
+                "index_key": key,
+                "relative_path": rel,
+                "bands": bands,
+                "band_dates": dates,
+            }
+        )
+    items.sort(key=lambda x: (x["index_key"], x["relative_path"]))
+    return {"items": items}
+
+
+@router.get("/preprocess/s1-sar-index-stacks-preview/{project_id}")
+def get_s1_sar_index_stack_preview_disk(
+    project_id: int,
+    stack_relpath: str | None = Query(
+        None,
+        alias="path",
+        description="Ruta relativa bajo s1indices/ (p. ej. RVI/RVI_20250111_20251225.tif)",
+    ),
+    band: int | None = Query(
+        None,
+        ge=1,
+        description="Banda (fecha) 1..N.",
+    ),
+    index_palette: int = Query(
+        0,
+        ge=0,
+        le=1,
+        description="1 = paleta RdYlGn (galería «Visual índices SAR»).",
+    ),
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(tenant_from_jwt),
+):
+    """PNG de una banda de un stack de índices SAR en ``s1indices/``."""
+    from app.services.s1_sar_indices import S1_SAR_STACKS_ROOT_NAME
+
+    project = db.query(Project).filter(Project.id == project_id, Project.tenant_id == tenant_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    if stack_relpath is None or not str(stack_relpath).strip():
+        raise HTTPException(status_code=400, detail="Indica path")
+
+    root = _tenant_storage(tenant_id, project_id, S1_SAR_STACKS_ROOT_NAME).resolve()
+    rel = Path(str(stack_relpath).strip().replace("\\", "/"))
+    if rel.is_absolute() or ".." in rel.parts:
+        raise HTTPException(status_code=400, detail="Ruta relativa no válida")
+    tif_path = (root / rel).resolve()
+    if not tif_path.is_file() or not tif_path.is_relative_to(root):
+        raise HTTPException(status_code=404, detail="Stack SAR no encontrado")
+    if "_cog" in tif_path.name.lower():
+        raise HTTPException(status_code=400, detail="Usa el GeoTIFF fuente del stack")
+
+    first_seg = rel.parts[0] if rel.parts else ""
+    index_key = _canonical_s1_sar_index_dir_name(first_seg) or first_seg
     meta = {
         "s2_index_stack": True,
         "vegetation_index_key": index_key,
@@ -894,6 +1239,130 @@ def preprocess_vegetation_time_series(
             "description": (
                 "Índice por escena normalizado min-max en toda la imagen; series por píxel en valores [0,1]. "
                 "Muestreo aleatorio de píxeles válidos en todas las fechas."
+            ),
+        },
+        "per_pixel": {
+            "n_sampled": n_sampled,
+            "n_valid_pixels": n_valid,
+            "max_requested": payload.max_pixel_series,
+            "random_seed": payload.random_seed,
+            "series_by_index": series_by_index,
+        },
+    }
+
+
+@router.post("/preprocess/s1-sar-time-series")
+def preprocess_s1_sar_time_series(
+    payload: S1SarTimeSeriesRequest,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(tenant_from_jwt),
+):
+    """
+    Medias espaciales y series por píxel (muestreadas) desde los stacks en ``s1indices/``,
+    misma forma de respuesta que ``/preprocess/vegetation-time-series`` (campo adicional ``source``).
+    """
+    from app.services.s1_sar_indices import S1_SAR_INDEX_KEYS
+    from app.services.s1_sar_time_series import (
+        build_normalized_sar_volumes_for_dates,
+        discover_primary_s1_sar_stacks,
+        intersection_sorted_dates,
+        sample_pixel_series_from_stacks,
+    )
+
+    project = db.query(Project).filter(Project.id == payload.project_id, Project.tenant_id == tenant_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    stacks = discover_primary_s1_sar_stacks(tenant_id, payload.project_id)
+    if len(stacks) < len(S1_SAR_INDEX_KEYS):
+        raise HTTPException(
+            status_code=400,
+            detail="No hay stacks completos para los cinco índices SAR en s1indices/. Ejecuta «Estimar índices SAR».",
+        )
+
+    available = set(intersection_sorted_dates(stacks))
+    if not available:
+        raise HTTPException(
+            status_code=400,
+            detail="No hay fechas comunes entre todos los stacks en s1indices/.",
+        )
+
+    wanted_sorted: list[str] = []
+    seen: set[str] = set()
+    for d in payload.dates:
+        raw = str(d).strip()
+        nd = raw[:10] if len(raw) >= 10 else raw
+        if nd not in available:
+            raise HTTPException(
+                status_code=400,
+                detail=f"La fecha {nd} no está en la intersección de fechas de todos los índices SAR (s1indices/).",
+            )
+        if nd not in seen:
+            seen.add(nd)
+            wanted_sorted.append(nd)
+    wanted_sorted.sort()
+
+    INDEX_LIST = tuple(S1_SAR_INDEX_KEYS)
+
+    try:
+        stacked, _ref = build_normalized_sar_volumes_for_dates(stacks, wanted_sorted, INDEX_LIST)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"No se pudieron leer los stacks SAR: {exc!s}") from exc
+
+    points: list[dict] = []
+    for t, date in enumerate(wanted_sorted):
+        row: dict = {"date": date, "raster_layer_id": t + 1, "by_index": {}}
+        for ix in INDEX_LIST:
+            plane = stacked[ix][t]
+            fin = plane[np.isfinite(plane)]
+            if fin.size == 0:
+                row["by_index"][ix] = {
+                    "mean": None,
+                    "std": None,
+                    "n_pixels": 0,
+                    "n_pixels_raw": 0,
+                }
+            else:
+                npx = int(fin.size)
+                row["by_index"][ix] = {
+                    "mean": float(np.nanmean(plane)),
+                    "std": float(np.nanstd(plane)),
+                    "n_pixels": npx,
+                    "n_pixels_raw": npx,
+                }
+        points.append(row)
+
+    temporal_stats: dict = {}
+    for ix in INDEX_LIST:
+        vals = [p["by_index"][ix]["mean"] for p in points if p["by_index"][ix]["mean"] is not None]
+        if not vals:
+            temporal_stats[ix] = {"mean": None, "std": None}
+        else:
+            a = np.array(vals, dtype=np.float64)
+            temporal_stats[ix] = {
+                "mean": float(np.mean(a)),
+                "std": float(np.std(a, ddof=1)) if len(vals) > 1 else 0.0,
+            }
+
+    series_by_index, n_sampled, n_valid = sample_pixel_series_from_stacks(
+        stacked,
+        INDEX_LIST,
+        payload.max_pixel_series,
+        payload.random_seed,
+    )
+
+    return {
+        "source": "s1_sar",
+        "project_id": payload.project_id,
+        "dates": wanted_sorted,
+        "indices": list(INDEX_LIST),
+        "points": points,
+        "temporal_stats": temporal_stats,
+        "spatial_aggregation": {
+            "method": "all_valid_pixels",
+            "description": (
+                "Índices SAR por fecha desde s1indices/; normalización min-max por fecha en cada índice. "
+                "Muestreo aleatorio de píxeles válidos en todas las fechas e índices."
             ),
         },
         "per_pixel": {

@@ -1,5 +1,41 @@
 import { useEffect, useState } from "react";
 import api, { formatApiErrorDetail, setAuthToken } from "../api";
+import RgbTimeSeriesGallery from "./RgbTimeSeriesGallery";
+import VegetationTimeSeriesCharts from "./VegetationTimeSeriesCharts";
+
+/** Catálogo índices SAR (sigma0 VV/VH lineal); claves = carpetas bajo ``s1indices/``. */
+export const S1_SAR_INDEX_CATALOG = [
+  {
+    id: "TODOS",
+    label: "TODOS",
+    description: "Genera en un solo proceso los stacks RVI, RFDI, VV_VH, VH_VV y NRPB.",
+  },
+  {
+    id: "RVI",
+    label: "RVI",
+    description: "Radar Vegetation Index: 4 × VH / (VH + VV) en potencia lineal (10^(dB/10)).",
+  },
+  {
+    id: "RFDI",
+    label: "RFDI",
+    description: "Radar Forest Degradation Index: (VV − VH) / (VV + VH) en lineal.",
+  },
+  {
+    id: "VV_VH",
+    label: "VV/VH",
+    description: "Cociente polarimétrico: VV / VH en lineal.",
+  },
+  {
+    id: "VH_VV",
+    label: "VH/VV",
+    description: "Cociente polarimétrico: VH / VV en lineal.",
+  },
+  {
+    id: "NRPB",
+    label: "NRPB",
+    description: "Normalized Ratio Procedure between Bands: (VH − VV) / (VH + VV) en lineal.",
+  },
+];
 
 function formatFileSize(bytes) {
   if (bytes == null || !Number.isFinite(Number(bytes))) return "";
@@ -21,10 +57,12 @@ export default function Sentinel1Panel({
   onOpenPreproGallery,
   onOpenPreproClusterViz,
   recortePipelineBusy,
+  s1SarStacksBusy = false,
   onS1GrdRecortes,
+  onS1SarIndexStacks,
 }) {
   const vectorLayers = mapLayers.filter((l) => l.kind === "vector");
-  const busy = loading || recortePipelineBusy;
+  const busy = loading || recortePipelineBusy || s1SarStacksBusy;
 
   /** Capas vectoriales del proyecto (BD), no solo las pintadas en el mapa — alinea el AOI con el shapefile elegido. */
   const [serverVectorLayers, setServerVectorLayers] = useState([]);
@@ -34,13 +72,33 @@ export default function Sentinel1Panel({
   const [s1InventoryLoading, setS1InventoryLoading] = useState(false);
   const [s1Error, setS1Error] = useState("");
   const [s1Selected, setS1Selected] = useState(() => new Set());
+  /** null | "indices" (estimar SAR) | "ts" (series de tiempo desde s1indices/) */
+  const [s1GalleryKind, setS1GalleryKind] = useState(null);
+  const [selectedS1SarIndices, setSelectedS1SarIndices] = useState([]);
+  const [s1VtsModalOpen, setS1VtsModalOpen] = useState(false);
+  const [s1VtsData, setS1VtsData] = useState(null);
+  const [s1VtsLoading, setS1VtsLoading] = useState(false);
+  const [s1VtsError, setS1VtsError] = useState("");
 
   useEffect(() => {
     setS1ModalOpen(false);
     setS1Inventory(null);
     setS1Error("");
     setS1Selected(new Set());
+    setS1GalleryKind(null);
+    setSelectedS1SarIndices([]);
+    setS1VtsModalOpen(false);
+    setS1VtsData(null);
+    setS1VtsError("");
   }, [projectId]);
+
+  /**
+   * La pestaña SI no ofrece RGB ni índices S2; al entrar desde Prepro, mapear modos de visualización.
+   */
+  useEffect(() => {
+    if (stackMode === "visual-rgb") setStackMode("visual-s1-vv");
+    else if (stackMode === "visual-index") setStackMode("visual-s1-sar-indices");
+  }, [stackMode, setStackMode]);
 
   useEffect(() => {
     if (!projectId || !token) {
@@ -158,8 +216,10 @@ export default function Sentinel1Panel({
           onChange={(e) => setStackMode(e.target.value)}
           disabled={busy}
         >
-          <option value="visual-rgb">Visual RGB (serie temporal)</option>
-          <option value="visual-index">Visual índices (serie temporal)</option>
+          <option value="visual-s1-vv">Visual VV</option>
+          <option value="visual-s1-vh">Visual VH</option>
+          <option value="visual-s1-index">Visual índice S1</option>
+          <option value="visual-s1-sar-indices">Visual índices SAR (serie temporal)</option>
           <option value="visual-cluster">Visual cluster</option>
         </select>
       </label>
@@ -174,12 +234,60 @@ export default function Sentinel1Panel({
         }}
         disabled={!projectId || !token || loading}
       >
-        {stackMode === "visual-rgb"
-          ? "Abrir galería RGB (serie temporal)"
-          : stackMode === "visual-index"
-            ? "Abrir galería de índices (serie temporal)"
-            : "Abrir visualización de clusters GMM"}
+        {stackMode === "visual-s1-vv"
+          ? "Abrir galería VV"
+          : stackMode === "visual-s1-vh"
+            ? "Abrir galería VH"
+            : stackMode === "visual-s1-index"
+              ? "Abrir galería índice S1 (VH/VV)"
+              : stackMode === "visual-s1-sar-indices"
+                ? "Abrir galería de índices SAR (serie temporal)"
+                : "Abrir visualización de clusters GMM"}
       </button>
+
+      <div className="indices-section">
+        <div className="indices-section-title">
+          <strong>3) Índices SAR (Sentinel-1)</strong>
+          <span className="indices-section-hint">
+            Por escena, en la misma carpeta <code>*.data</code>: <strong>VV</strong> ={" "}
+            <code>Sigma0_VV_db.img</code>, <strong>VH</strong> = <code>Sigma0_VH_db.img</code> (sigma0 dB en{" "}
+            <code>s1prepoceso/</code>). Salida: un GeoTIFF por índice en <code>s1indices/&lt;ÍNDICE&gt;/</code>, una
+            banda por fecha en orden cronológico.
+          </span>
+        </div>
+        <button
+          type="button"
+          className="indices-run-btn"
+          onClick={() => {
+            setSelectedS1SarIndices([]);
+            setS1GalleryKind("indices");
+          }}
+          disabled={busy || !projectId || !token}
+        >
+          Estimar índices SAR
+        </button>
+      </div>
+
+      <div className="indices-section">
+        <div className="indices-section-title">
+          <strong>5) Series de tiempo</strong>
+          <span className="indices-section-hint">
+            Mismas fechas que aparecen en <strong>los cinco</strong> stacks bajo <code>s1indices/</code> (RVI, RFDI,
+            VV/VH, VH/VV, NRPB): medias espaciales y series por píxel (muestreadas), normalizadas 0–1 por fecha.
+          </span>
+        </div>
+        <button
+          type="button"
+          className="indices-run-btn"
+          onClick={() => {
+            setS1VtsError("");
+            setS1GalleryKind("ts");
+          }}
+          disabled={busy || !projectId || !token}
+        >
+          Seleccionar fechas
+        </button>
+      </div>
 
       {s1ModalOpen ? (
         <div
@@ -317,6 +425,96 @@ export default function Sentinel1Panel({
               </div>
             </div>
           </div>
+        </div>
+      ) : null}
+
+      <RgbTimeSeriesGallery
+        open={s1GalleryKind !== null}
+        mode={s1GalleryKind === "ts" ? "s1SarTimeSeriesSelect" : "s1SarIndexSelect"}
+        galleryVisualMode="rgb"
+        indexCatalog={S1_SAR_INDEX_CATALOG}
+        selectedIndices={selectedS1SarIndices}
+        onSelectedIndicesChange={setSelectedS1SarIndices}
+        onClose={() => setS1GalleryKind(null)}
+        canEstimate={selectedS1SarIndices.length > 0}
+        onEstimateIndices={(payload) => {
+          if (
+            payload &&
+            typeof payload === "object" &&
+            Array.isArray(payload.s1SarSceneVvRelpaths) &&
+            payload.s1SarSceneVvRelpaths.length > 0
+          ) {
+            void onS1SarIndexStacks?.({
+              sceneVvRelpaths: payload.s1SarSceneVvRelpaths,
+              indices: Array.isArray(payload.s1SarIndices) ? payload.s1SarIndices : [],
+            });
+          }
+          setS1GalleryKind(null);
+        }}
+        onTimeSeries={async (arg) => {
+          if (!token || !projectId) return;
+          if (!arg || typeof arg !== "object" || !Array.isArray(arg.s1SarDates) || !arg.s1SarDates.length) return;
+          setS1VtsLoading(true);
+          setS1VtsError("");
+          try {
+            setAuthToken(token);
+            const res = await api.post("/preprocess/s1-sar-time-series", {
+              project_id: Number(projectId),
+              dates: arg.s1SarDates,
+            });
+            setS1VtsData(res.data);
+            setS1GalleryKind(null);
+            setS1VtsModalOpen(true);
+          } catch (e) {
+            setS1VtsError(formatApiErrorDetail(e));
+          } finally {
+            setS1VtsLoading(false);
+          }
+        }}
+        projectId={projectId}
+        token={token}
+      />
+
+      {s1VtsModalOpen && s1VtsData ? (
+        <div
+          className="index-modal-overlay vts-modal-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="s1-vts-modal-title"
+          onClick={() => {
+            setS1VtsModalOpen(false);
+            setS1VtsData(null);
+          }}
+        >
+          <div className="index-modal vts-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="index-modal-header">
+              <h3 id="s1-vts-modal-title">Series de tiempo — índices SAR (s1indices/)</h3>
+              <button
+                type="button"
+                className="index-modal-close"
+                onClick={() => {
+                  setS1VtsModalOpen(false);
+                  setS1VtsData(null);
+                }}
+                aria-label="Cerrar"
+              >
+                ×
+              </button>
+            </div>
+            <div className="index-modal-body vts-modal-body">
+              <VegetationTimeSeriesCharts data={s1VtsData} />
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {s1VtsLoading ? (
+        <div className="vts-loading-toast" role="status">
+          Calculando series de tiempo SAR…
+        </div>
+      ) : null}
+      {s1VtsError ? (
+        <div className="status-msg vts-error-msg" role="alert">
+          {s1VtsError}
         </div>
       ) : null}
     </>

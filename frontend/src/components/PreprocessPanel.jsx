@@ -155,6 +155,12 @@ export default function PreprocessPanel({
   const hasVectors = vectorLayers.length > 0;
   const busy = loading || recortePipelineBusy || indexStacksBusy;
 
+  /** Modos del desplegable de esta pestaña; ``stackMode`` puede ser un modo S1 entre pestañas. */
+  const PREPRO_STACK_SELECT_VALUES = ["visual-rgb", "visual-index", "visual-cluster"];
+  const preproStackSelectValue = PREPRO_STACK_SELECT_VALUES.includes(stackMode)
+    ? stackMode
+    : "visual-rgb";
+
   useEffect(() => {
     const ds = clusterElbowResults?.datasets;
     if (!ds?.length) return;
@@ -665,7 +671,7 @@ export default function PreprocessPanel({
       <label>
         2) Visualización
         <select
-          value={stackMode}
+          value={preproStackSelectValue}
           onChange={(e) => {
             const v = e.target.value;
             setStackMode(v);
@@ -705,7 +711,9 @@ export default function PreprocessPanel({
           ? "Abrir galería RGB (serie temporal)"
           : stackMode === "visual-index"
             ? "Abrir galería de índices (serie temporal)"
-            : "Abrir visualización de clusters GMM"}
+            : stackMode === "visual-s1-sar-indices"
+              ? "Abrir galería de índices SAR (serie temporal)"
+              : "Abrir visualización de clusters GMM"}
       </button>
 
       <div className="indices-section">
@@ -1030,7 +1038,19 @@ export default function PreprocessPanel({
         open={galleryOpen}
         mode={galleryMode}
         galleryVisualMode={
-          galleryMode === "view" && stackMode === "visual-index" ? "index" : "rgb"
+          galleryMode !== "view"
+            ? "rgb"
+            : stackMode === "visual-index"
+              ? "index"
+              : stackMode === "visual-s1-sar-indices"
+                ? "s1-sar-index"
+                : stackMode === "visual-s1-vv"
+                  ? "s1-vv"
+                  : stackMode === "visual-s1-vh"
+                    ? "s1-vh"
+                    : stackMode === "visual-s1-index"
+                      ? "s1-index"
+                      : "rgb"
         }
         indexCatalog={INDEX_CATALOG}
         selectedIndices={selectedIndices}
@@ -1050,7 +1070,9 @@ export default function PreprocessPanel({
           setGalleryOpen(false);
         }}
         onTimeSeries={async (ids) => {
-          if (!token || !projectId || !ids?.length) return;
+          if (!token || !projectId) return;
+          if (ids && typeof ids === "object" && !Array.isArray(ids)) return;
+          if (!Array.isArray(ids) || !ids.length) return;
           setVtsLoading(true);
           setVtsError("");
           try {

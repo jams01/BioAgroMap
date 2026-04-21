@@ -112,6 +112,21 @@ class S2L2aRecorteRequest(BaseModel):
     )
 
 
+class S1SarIndexStacksRequest(BaseModel):
+    """Stacks multibanda de índices SAR (VV/VH sigma0 dB) desde ``s1prepoceso/``."""
+
+    project_id: int
+    indices: list[str] = Field(..., min_length=1, description="RVI, RFDI, VV_VH, VH_VV, NRPB y/o TODOS")
+    scene_vv_relpaths: list[str] = Field(
+        ...,
+        min_length=1,
+        description=(
+            "Rutas relativas a ``Sigma0_VV_db.img`` bajo ``s1prepoceso/`` (una por escena). "
+            "El VH de la misma escena se toma de ``Sigma0_VH_db.img`` en esa carpeta."
+        ),
+    )
+
+
 class S2IndexStacksRequest(BaseModel):
     """Stacks multibanda de índices de vegetación desde recortes L2A (6 bandas)."""
 
@@ -137,6 +152,27 @@ class VegetationTimeSeriesRequest(BaseModel):
 
     project_id: int
     raster_layer_ids: list[int] = Field(..., min_length=1)
+    max_pixel_series: int = Field(
+        default=4000,
+        ge=1,
+        le=50_000,
+        description="Máximo de píxeles para los que se devuelven series completas (todas las fechas).",
+    )
+    random_seed: int = Field(default=42, description="Semilla para el muestreo aleatorio de píxeles.")
+
+
+class S1SarTimeSeriesRequest(BaseModel):
+    """Series temporales desde stacks multibanda en ``s1indices/`` (RVI, RFDI, VV_VH, VH_VV, NRPB).
+
+    Solo se usan fechas presentes en **los cinco** stacks (intersección de ``BAND_DATES_JSON``).
+    """
+
+    project_id: int
+    dates: list[str] = Field(
+        ...,
+        min_length=1,
+        description="Fechas ISO (YYYY-MM-DD) a incluir; deben existir en todos los índices SAR del proyecto.",
+    )
     max_pixel_series: int = Field(
         default=4000,
         ge=1,

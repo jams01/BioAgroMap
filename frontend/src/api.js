@@ -1,10 +1,10 @@
 import axios from "axios";
 
 /**
- * Misma máquina que la página (p. ej. :5173) + /api/v1 → Vite hace proxy al backend.
- * Evita "Network Error" si VITE_API_URL apunta a localhost:8000 pero el usuario abre la app por IP/LAN.
+ * Sin VITE_API_URL: mismo origen que la página + `/api/v1` (p. ej. :5173). En dev, Vite reenvía `/api` al
+ * backend (`BACKEND_PROXY_URL` en Docker, por defecto `http://127.0.0.1:8000` en el host). Así el navegador
+ * no depende de que el puerto 8000 esté expuesto ni de CORS hacia :8000.
  */
-/** Puerto del API FastAPI en desarrollo (mismo host que Vite; evita depender del proxy /api). */
 const DEV_API_PORT = import.meta.env.VITE_DEV_API_PORT || "8000";
 
 function resolveApiBase() {
@@ -23,13 +23,6 @@ function resolveApiBase() {
     return `${u}/api/v1`;
   }
   if (typeof window !== "undefined" && window.location?.origin) {
-    const h = window.location.hostname;
-    const dev = import.meta.env.DEV;
-    // En dev, llamar directo a uvicorn evita 404 del proxy de Vite si /api no reenvía bien.
-    // Desde LAN (IP) se sigue usando el mismo origen + proxy (CORS puede no incluir la IP).
-    if (dev && (h === "localhost" || h === "127.0.0.1")) {
-      return `http://127.0.0.1:${DEV_API_PORT}/api/v1`;
-    }
     return `${window.location.origin}/api/v1`;
   }
   return `http://127.0.0.1:${DEV_API_PORT}/api/v1`;
@@ -152,7 +145,7 @@ export function formatApiErrorDetail(error) {
     (error.code === "ERR_NETWORK" || String(error.message || "").includes("Network Error"))
   ) {
     const tried = resolvedRequestUrl(error);
-    return `No se pudo conectar con el API (${tried || "URL no deducible"}). Comprueba que el backend esté en marcha. Si abres la app por IP o desde otro equipo, define VITE_API_URL con la URL del servidor (p. ej. http://IP:8000) o asegura el proxy de Vite hacia /api.`;
+    return `No se pudo conectar con el API (${tried || "URL no deducible"}). Comprueba que el backend esté en marcha (p. ej. \`docker compose up -d backend\` o uvicorn en el puerto configurado). Con Vite en dev, las peticiones van al mismo origen que la página + /api; el proxy debe apuntar al API. Si deseas llamar directo al puerto del API, define VITE_API_URL (p. ej. http://127.0.0.1:8000).`;
   }
   const d = error.response?.data?.detail;
   if (d == null) return error.message || "Error de red o servidor";

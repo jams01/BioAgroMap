@@ -333,6 +333,65 @@ body {
   text-align: center;
 }
 
+/* Visual VV (s1prepoceso): polarización VV/VH en la barra de zoom */
+.rgb-gallery-s1-pol {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  padding-right: 10px;
+  margin-right: 4px;
+  border-right: 1px solid #d8dce4;
+}
+
+.rgb-gallery-s1-pol-btn {
+  min-width: 2.5rem;
+  padding: 6px 12px;
+  font-size: 13px;
+  font-weight: 700;
+  border: 1px solid #c8ced6;
+  border-radius: 8px;
+  background: #fff;
+  color: #333;
+  cursor: pointer;
+}
+
+.rgb-gallery-s1-pol-btn:hover {
+  border-color: #2d6cdf;
+  color: #1a4a9e;
+}
+
+.rgb-gallery-s1-pol-btn--active {
+  border-color: #2d6cdf;
+  background: #e8f0fc;
+  color: #1a4a9e;
+}
+
+/* Paleta VV: misma fila que zoom (.rgb-gallery-toolbar) */
+.rgb-gallery-s1-palette-inline {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.rgb-gallery-s1-palette-inline-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-size: 0.875rem;
+  color: #333;
+  white-space: nowrap;
+}
+
+.rgb-gallery-s1-palette-select {
+  min-width: 8.5rem;
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid #ccc;
+  background: #fff;
+}
+
 .rgb-gallery-index-switcher {
   display: flex;
   flex-wrap: wrap;

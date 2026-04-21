@@ -338,6 +338,79 @@ def _stretch_band_to_u8_sentinel_friendly(band: np.ndarray) -> np.ndarray:
     return (y * 255.0).astype(np.uint8)
 
 
+def render_s1_vh_vv_ratio_preview_png(
+    path: Path,
+    max_dim: int = 2048,
+    layer_metadata: dict | None = None,
+    *,
+    cmap_name: str = "RdYlGn",
+) -> bytes:
+    """
+    Índice tipo VH/VV en potencia lineal (útil como «índice radar» sobre GRD IW VV+VH).
+
+    Bandas esperadas: 1 = VV, 2 = VH. Los recortes SNAP suelen estar en sigma0 dB:
+    convierte dB → lineal antes del cociente.
+    """
+    if Image is None:
+        raise RuntimeError("Pillow is required for raster previews")
+
+    meta = layer_metadata or {}
+    cmap = meta.get("index_preview_cmap") or cmap_name
+    if not isinstance(cmap, str) or not cmap.strip():
+        cmap = cmap_name
+
+    with rasterio.open(path) as src:
+        if src.count < 2:
+            raise ValueError("VH/VV requiere al menos 2 bandas (VV, VH)")
+        h, w = src.height, src.width
+        scale = min(1.0, float(max_dim) / max(h, w))
+        out_h = max(1, int(h * scale))
+        out_w = max(1, int(w * scale))
+        vv = src.read(
+            1,
+            out_shape=(out_h, out_w),
+            resampling=Resampling.bilinear,
+        ).astype(np.float64)
+        vh = src.read(
+            2,
+            out_shape=(out_h, out_w),
+            resampling=Resampling.bilinear,
+        ).astype(np.float64)
+
+    finite_v = np.isfinite(vv)
+    finite_h = np.isfinite(vh)
+    finite = finite_v & finite_h
+
+    # Recortes S1 del pipeline: sigma0 dB (negativos típicos)
+    use_db = bool(meta.get("s1_grd_recorte") or meta.get("s1_iw_grd_vv_vh"))
+    if not use_db:
+        med = float(np.nanmedian(vv[np.isfinite(vv)])) if np.any(np.isfinite(vv)) else 0.0
+        use_db = med < 5.0 and float(np.nanpercentile(vv[np.isfinite(vv)], 95)) < 50.0
+
+    if use_db:
+        vv_lin = np.power(10.0, np.clip(vv, -50.0, 30.0) / 10.0)
+        vh_lin = np.power(10.0, np.clip(vh, -50.0, 30.0) / 10.0)
+    else:
+        vv_lin = np.maximum(vv, 0.0)
+        vh_lin = np.maximum(vh, 0.0)
+
+    ratio = np.divide(
+        vh_lin,
+        vv_lin + 1e-30,
+        out=np.full_like(vh_lin, np.nan),
+        where=finite,
+    )
+    z = np.full_like(ratio, np.nan, dtype=np.float64)
+    z[finite] = np.log10(np.clip(ratio[finite], 1e-12, None))
+
+    t01 = _normalize_index_band_01(z)
+    rgb = _index_scalar_to_rgb_colormap(t01, cmap_name=cmap)
+    img = Image.fromarray(rgb, mode="RGB")
+    buf = io.BytesIO()
+    img.save(buf, format="PNG", optimize=True)
+    return buf.getvalue()
+
+
 def render_raster_preview_png(
     path: Path,
     max_dim: int = 2048,

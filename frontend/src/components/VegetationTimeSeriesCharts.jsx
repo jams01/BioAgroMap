@@ -5,12 +5,14 @@
 
 const INDEX_KEYS = ["NDVI", "EVI", "NDWI", "CIre", "MCARI"];
 
-function formatDateLabel(iso) {
+/** Eje X compacto: ``dd/mm/aa`` (S2 y S1). */
+function formatDateLabelDdMmYy(iso) {
   if (typeof iso !== "string" || iso.length < 8) return String(iso ?? "");
   if (iso.startsWith("layer-")) return iso;
   const m = iso.match(/^(\d{4})-(\d{2})-(\d{2})/);
-  if (!m) return iso;
-  return `${m[3]}/${m[2]}/${m[1]}`;
+  if (!m) return String(iso);
+  const yy = m[1].slice(2);
+  return `${m[3]}/${m[2]}/${yy}`;
 }
 
 function parseSceneTime(d) {
@@ -33,6 +35,8 @@ function clamp01(x) {
 
 const COLOR_SERIES = "#1565c0";
 const COLOR_MEAN_LINE = "#c62828";
+/** Tendencia lineal (OLS) — violeta (S2 y S1). */
+const COLOR_TREND_LINE = "#7e57c2";
 
 /** Mediana de un array numérico (copia y ordena). */
 function medianOf(values) {
@@ -65,9 +69,14 @@ function tukeyFenceBounds(scores, iqrFactor = 1.5) {
 
 /**
  * Elimina series atípicas: distancia a la mediana temporal (MAE respecto a la curva mediana por fecha).
- * Tukey IQR sobre esas distancias (factor 1.5).
+ * Tukey IQR sobre esas distancias. Con pocas series o IQR≈0, se relaja o se omite el filtro para evitar
+ * descartes erráticos (p. ej. índices SAR con pocas fechas).
  */
-function filterPixelSeriesOutliers(seriesList, iqrFactor = 1.5) {
+function filterPixelSeriesOutliers(
+  seriesList,
+  iqrFactor = 1.5,
+  minSeriesBeforeFilter = 4,
+) {
   if (!Array.isArray(seriesList) || seriesList.length === 0) {
     return { kept: [], removed: 0, medianProfile: [], deviationScores: [] };
   }
@@ -75,7 +84,7 @@ function filterPixelSeriesOutliers(seriesList, iqrFactor = 1.5) {
   if (!seriesList.every((s) => Array.isArray(s) && s.length === T)) {
     return { kept: seriesList.slice(), removed: 0, medianProfile: [], deviationScores: [] };
   }
-  if (seriesList.length < 4) {
+  if (seriesList.length < minSeriesBeforeFilter) {
     const mp = [];
     for (let t = 0; t < T; t += 1) {
       mp.push(medianOf(seriesList.map((s) => s[t])));
@@ -105,12 +114,20 @@ function filterPixelSeriesOutliers(seriesList, iqrFactor = 1.5) {
     return c > 0 ? sum / c : NaN;
   });
 
-  const { low, high } = tukeyFenceBounds(deviationScores, iqrFactor);
-  const kept = seriesList.filter((_, i) => {
+  let { low, high } = tukeyFenceBounds(deviationScores, iqrFactor);
+  if (!Number.isFinite(low) || !Number.isFinite(high) || low >= high) {
+    return {
+      kept: seriesList.slice(),
+      removed: 0,
+      medianProfile,
+      deviationScores,
+    };
+  }
+  let kept = seriesList.filter((_, i) => {
     const sc = deviationScores[i];
     return Number.isFinite(sc) && sc >= low && sc <= high;
   });
-  const removed = seriesList.length - kept.length;
+  let removed = seriesList.length - kept.length;
 
   if (kept.length === 0) {
     return {
@@ -152,6 +169,34 @@ function temporalMeanAndStd(curve) {
   const varsum = v.reduce((s, x) => s + (x - mean) ** 2, 0);
   const std = Math.sqrt(varsum / (v.length - 1));
   return { mean, std };
+}
+
+/**
+ * Tendencia lineal (mínimos cuadrados) ``y ≈ a + b·t`` con ``t`` = tiempo en ms (solo pares finitos).
+ * Devuelve función ``(t) => a + b*t`` o null.
+ */
+function olsLinearTrendFn(times, ys) {
+  let sumT = 0;
+  let sumY = 0;
+  let sumTT = 0;
+  let sumTY = 0;
+  let n = 0;
+  for (let i = 0; i < times.length; i += 1) {
+    const t = times[i];
+    const y = ys[i];
+    if (!Number.isFinite(t) || y == null || !Number.isFinite(y)) continue;
+    sumT += t;
+    sumY += y;
+    sumTT += t * t;
+    sumTY += t * y;
+    n += 1;
+  }
+  if (n < 2) return null;
+  const denom = n * sumTT - sumT * sumT;
+  if (Math.abs(denom) < 1e-18) return null;
+  const b = (n * sumTY - sumT * sumY) / denom;
+  const a = (sumY - b * sumT) / n;
+  return (t) => a + b * t;
 }
 
 function buildPathTimeScaled(times, ys, w, h, padL, padR, padT, padB, yMin, yMax, tMin, tMax) {
@@ -198,13 +243,15 @@ function IndexChart({
   pixelSeriesList,
   perPixelMeta,
   temporalStatsFromApi,
+  isS1Sar = false,
 }) {
   const W = 900;
   const H = 260;
   const padL = 58;
   const padR = 20;
   const padT = 16;
-  const padB = 78;
+  /** Margen inferior: título «Fecha» + fechas a 45° (ancladas a ``yPlotBottom``). */
+  const padB = 88;
 
   const xs = points.map((p) => p.date);
   const times = xs.map(parseSceneTime);
@@ -218,10 +265,19 @@ function IndexChart({
 
   const innerW = W - padL - padR;
   const innerH = H - padT - padB;
+  /** Borde inferior del área de trazado (eje y = 0). */
+  const yPlotBottom = padT + innerH;
+  /** Etiquetas de fecha pegadas al gráfico (evita solaparse con «Fecha» abajo). */
+  const yDateTicks = yPlotBottom + 10;
+  const yAxisCaption = H - 5;
 
   const usePixels = Array.isArray(pixelSeriesList) && pixelSeriesList.length > 0;
 
-  const outlierResult = usePixels ? filterPixelSeriesOutliers(pixelSeriesList) : null;
+  const outlierIqrFactor = isS1Sar ? 2.5 : 1.5;
+  const outlierMinSeries = isS1Sar ? 10 : 4;
+  const outlierResult = usePixels
+    ? filterPixelSeriesOutliers(pixelSeriesList, outlierIqrFactor, outlierMinSeries)
+    : null;
   const filteredSeries = outlierResult?.kept ?? [];
   const nOutliersRemoved = outlierResult?.removed ?? 0;
   const nSeriesRaw = usePixels ? pixelSeriesList.length : 0;
@@ -258,6 +314,29 @@ function IndexChart({
         )
       : "";
 
+  const curveForTrend =
+    usePixels && meanCurvePixels.length > 0
+      ? meanCurvePixels
+      : ysMean.map((y) => (y != null && Number.isFinite(y) ? y : NaN));
+  const trendFn = curveForTrend.some((y) => Number.isFinite(y))
+    ? olsLinearTrendFn(times, curveForTrend)
+    : null;
+  const trendYs =
+    trendFn != null
+      ? times.map((t) => {
+          if (!Number.isFinite(t)) return null;
+          const v = trendFn(t);
+          if (!Number.isFinite(v)) return null;
+          return clamp01(v);
+        })
+      : [];
+  const trendPath =
+    trendFn != null && trendYs.some((y) => y != null && Number.isFinite(y))
+      ? buildPathTimeScaled(times, trendYs, W, H, padL, padR, padT, padB, yMin, yMax, tMin, tMax)
+      : "";
+
+  const fmtDate = formatDateLabelDdMmYy;
+
   const nScenes = points.length;
 
   const apiMu = temporalStatsFromApi?.mean;
@@ -265,7 +344,7 @@ function IndexChart({
 
   const statsLine = usePixels ? (
     <>
-      Escenas: {nScenes} · series dibujadas: {filteredSeries.length}
+      {isS1Sar ? "Fechas" : "Escenas"}: {nScenes} · series dibujadas: {filteredSeries.length}
       {nSeriesRaw > 0 ? (
         <>
           {" "}
@@ -273,7 +352,9 @@ function IndexChart({
           {perPixelMeta?.n_valid_pixels != null
             ? ` de ${perPixelMeta.n_valid_pixels.toLocaleString()} píxeles válidos`
             : ""}
-          {nOutliersRemoved > 0 ? ` · ${nOutliersRemoved} atípicas por IQR` : ""})
+          {nOutliersRemoved > 0
+            ? ` · ${nOutliersRemoved} atípicas (IQR Tukey, factor ${outlierIqrFactor})`
+            : ""})
         </>
       ) : null}
       <br />
@@ -292,7 +373,7 @@ function IndexChart({
     </>
   ) : (
     <>
-      Escenas: {nScenes}
+      {isS1Sar ? "Fechas" : "Escenas"}: {nScenes}
       <br />
       <span className="vts-chart-stats-detail">
         Media espacial por fecha: μ temporal = {apiMu != null && Number.isFinite(apiMu) ? apiMu.toFixed(4) : "—"} · σ
@@ -400,6 +481,16 @@ function IndexChart({
             strokeLinejoin="round"
           />
         ) : null}
+        {trendPath ? (
+          <path
+            d={trendPath}
+            fill="none"
+            stroke={COLOR_TREND_LINE}
+            strokeWidth={2.2}
+            strokeLinejoin="round"
+            opacity={0.95}
+          />
+        ) : null}
         {!usePixels
           ? xs.map((d, i) => {
               if (!validMean[i] || ysMean[i] == null) return null;
@@ -407,21 +498,22 @@ function IndexChart({
               const yMean = clamp01(ysMean[i]);
               const py = yPixelAt(yMean, H, padT, padB, yMin, yMax);
               const npx = points[i].by_index?.[indexKey]?.n_pixels;
-              const lbl = formatDateLabel(d);
+              const lbl = fmtDate(d);
               return (
                 <g key={`${d}-${i}`}>
                   <circle cx={px} cy={py} r={4.5} fill={COLOR_SERIES} stroke="#fff" strokeWidth={1.5} />
                   <text
                     x={px}
-                    y={H - 52}
+                    y={yDateTicks}
                     fontSize={10}
                     fill="#333"
-                    textAnchor="middle"
+                    textAnchor="end"
                     fontWeight={600}
+                    transform={`rotate(-45 ${px} ${yDateTicks})`}
                   >
                     {lbl}
                   </text>
-                  <text x={px} y={H - 36} fontSize={9} fill="#666" textAnchor="middle">
+                  <text x={px} y={yDateTicks + 16} fontSize={9} fill="#666" textAnchor="middle">
                     N = {npx != null ? npx.toLocaleString() : "—"}
                   </text>
                 </g>
@@ -429,16 +521,17 @@ function IndexChart({
             })
           : xs.map((d, i) => {
               const px = xPixelAt(i, times, W, padL, padR, tMin, tMax, xs.length);
-              const lbl = formatDateLabel(d);
+              const lbl = fmtDate(d);
               return (
                 <text
                   key={`xlab-${d}-${i}`}
                   x={px}
-                  y={H - 36}
+                  y={yDateTicks}
                   fontSize={10}
                   fill="#333"
-                  textAnchor="middle"
+                  textAnchor="end"
                   fontWeight={600}
+                  transform={`rotate(-45 ${px} ${yDateTicks})`}
                 >
                   {lbl}
                 </text>
@@ -446,12 +539,12 @@ function IndexChart({
             })}
         <text
           x={padL + innerW / 2}
-          y={H - 12}
+          y={yAxisCaption}
           fontSize={11}
           fill="#444"
           textAnchor="middle"
         >
-          Fecha de escena
+          Fecha
         </text>
       </svg>
     </div>
@@ -466,16 +559,16 @@ export default function VegetationTimeSeriesCharts({ data }) {
       : [];
   const points = rawPoints.length ? rawPoints : dateFallback;
 
+  const keys = Array.isArray(data.indices) && data.indices.length ? data.indices : INDEX_KEYS;
+
   const pp = data?.per_pixel;
   const seriesMap = pp?.series_by_index;
   const hasPixelSeries =
-    seriesMap && typeof seriesMap === "object" && INDEX_KEYS.some((k) => (seriesMap[k]?.length ?? 0) > 0);
+    seriesMap && typeof seriesMap === "object" && keys.some((k) => (seriesMap[k]?.length ?? 0) > 0);
 
   if (!points.length && !hasPixelSeries) {
     return <p className="vts-empty">Sin datos.</p>;
   }
-
-  const keys = Array.isArray(data.indices) && data.indices.length ? data.indices : INDEX_KEYS;
 
   const meta = pp
     ? {
@@ -485,14 +578,28 @@ export default function VegetationTimeSeriesCharts({ data }) {
       }
     : null;
 
+  const isS1Sar = data?.source === "s1_sar";
+
   return (
     <div className="vts-charts-wrap">
       <p className="vts-chart-legend">
-        <strong>Leyenda:</strong> líneas tenues = series por píxel (0–1, min-max por escena). Se excluyen
-        series atípicas con <strong>IQR (Tukey, factor 1.5)</strong> sobre la distancia media a la mediana
-        temporal. Línea <span className="vts-legend-mean">roja</span> = media temporal entre píxeles no
-        atípicos. Debajo de cada gráfico: μ y σ de esa curva roja; «ref. escenas» usa las medias espaciales
-        por fecha del servidor.
+        <strong>Leyenda:</strong> líneas tenues = series por píxel (0–1, min-max por{" "}
+        {isS1Sar ? "fecha (SAR)" : "escena (L2A)"}). Eje X: <strong>dd/mm/aa</strong>, etiquetas a{" "}
+        <strong>45°</strong>. Línea <span className="vts-legend-mean">roja</span> = media temporal entre píxeles no
+        atípicos (tras filtro). Línea{" "}
+        <span style={{ color: COLOR_TREND_LINE, fontWeight: 600 }}>violeta</span> = tendencia lineal (OLS) sobre esa
+        media. «ref. escenas» = medias espaciales por fecha del servidor.{" "}
+        {isS1Sar ? (
+          <>
+            <strong>S1 SAR:</strong> atípicas con IQR Tukey <strong>factor 2.5</strong>; filtro solo si hay{" "}
+            <strong>≥10</strong> series (IQR 0 → no se descarta ninguna).
+          </>
+        ) : (
+          <>
+            <strong>S2:</strong> atípicas con IQR Tukey <strong>factor 1.5</strong>; filtro si hay{" "}
+            <strong>≥4</strong> series (IQR 0 → no se descarta ninguna).
+          </>
+        )}
         {meta?.n_valid_pixels != null && meta?.n_sampled != null ? (
           <>
             {" "}
@@ -509,6 +616,7 @@ export default function VegetationTimeSeriesCharts({ data }) {
           pixelSeriesList={hasPixelSeries ? seriesMap[key] || [] : []}
           perPixelMeta={meta}
           temporalStatsFromApi={data?.temporal_stats?.[key]}
+          isS1Sar={isS1Sar}
         />
       ))}
     </div>

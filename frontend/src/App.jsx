@@ -49,6 +49,7 @@ export default function App() {
   /** "s1" | "s2" | "" — para mensajes mientras Celery ejecuta el recorte. */
   const [recorteKind, setRecorteKind] = useState("");
   const [indexStacksTaskId, setIndexStacksTaskId] = useState("");
+  const [s1SarStacksTaskId, setS1SarStacksTaskId] = useState("");
   /** Incrementa para abrir la galería «Visual índices» al terminar la estimación. */
   const [visualIndexGalleryKick, setVisualIndexGalleryKick] = useState(0);
   const [sidebarTab, setSidebarTab] = useState("admin");
@@ -308,6 +309,48 @@ export default function App() {
       clearInterval(iv);
     };
   }, [indexStacksTaskId, projectId, token]);
+
+  useEffect(() => {
+    if (!s1SarStacksTaskId || !token || !projectId) {
+      return undefined;
+    }
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        setAuthToken(token);
+        const r = await api.get(`/preprocess/task-status/${s1SarStacksTaskId}`);
+        if (cancelled) return;
+        if (r.data.ready && r.data.state === "SUCCESS") {
+          const result = r.data.result || {};
+          const outs = result.outputs || {};
+          const errList = result.errors || [];
+          const parts = Object.entries(outs).map(([k, v]) => `${k}: ${v}`);
+          const errTxt = errList.length > 0 ? ` Escenas con avisos: ${errList.length}.` : "";
+          setS1SarStacksTaskId("");
+          setMessage(
+            Object.keys(outs).length > 0
+              ? `Stacks de índices SAR listos (${result.scene_count ?? "?"} escenas). ${parts.join(" | ")}${errTxt}`
+              : `${result.message || "Sin archivos de salida; comprueba s1prepoceso/ (VV+VH dB)."}${errTxt}`
+          );
+          if (Object.keys(outs).length > 0) {
+            setStackMode("visual-s1-sar-indices");
+            await selectProject(projectId, token);
+          }
+        } else if (r.data.ready && r.data.state === "FAILURE") {
+          setS1SarStacksTaskId("");
+          setMessage(`Error en índices SAR: ${r.data.error || "fallo"}`);
+        }
+      } catch (_) {
+        /* ignorar errores transitorios */
+      }
+    };
+    poll();
+    const iv = setInterval(poll, 2500);
+    return () => {
+      cancelled = true;
+      clearInterval(iv);
+    };
+  }, [s1SarStacksTaskId, projectId, token]);
 
   const {
     mapLayers,
@@ -946,6 +989,43 @@ export default function App() {
     }
   }
 
+  async function runS1SarIndexStacks({ sceneVvRelpaths, indices }) {
+    const paths = Array.isArray(sceneVvRelpaths)
+      ? [...new Set(sceneVvRelpaths.map((s) => String(s).trim().replace(/\\/g, "/")).filter(Boolean))]
+      : [];
+    const idx = Array.isArray(indices)
+      ? [...new Set(indices.map((s) => String(s).trim()).filter(Boolean))]
+      : [];
+    if (!token || !projectId) {
+      setMessage("Error: inicia sesión y selecciona un proyecto.");
+      return;
+    }
+    if (!idx.length) {
+      setMessage("Selecciona al menos un índice SAR (o TODOS) en la ventana de estimación.");
+      return;
+    }
+    if (!paths.length) {
+      setMessage("Selecciona al menos una escena (miniatura) con par VV+VH en s1prepoceso/.");
+      return;
+    }
+    setLoading(true);
+    setMessage("");
+    try {
+      setAuthToken(token);
+      const res = await api.post("/preprocess/s1-sar-index-stacks", {
+        project_id: Number(projectId),
+        indices: idx,
+        scene_vv_relpaths: paths,
+      });
+      setS1SarStacksTaskId(res.data.task_id);
+      setMessage(`Índices SAR en cola (tarea ${res.data.task_id}).`);
+    } catch (error) {
+      setMessage(`Error: ${formatApiErrorDetail(error)}`);
+    } finally {
+      setLoading(false);
+    }
+  }
+
   async function runClusterElbow() {
     if (!token || !projectId) {
       setMessage("Error: define proyecto.");
@@ -1071,10 +1151,12 @@ export default function App() {
         onRunAI={runAI}
         onDownload={preprocessDownload}
         recortePipelineBusy={!!recorteTaskId}
-        indexStacksBusy={!!indexStacksTaskId}
+        indexStacksBusy={!!indexStacksTaskId || !!s1SarStacksTaskId}
         visualIndexGalleryKick={visualIndexGalleryKick}
         onS2L2aRecortes={runS2L2aRecortes}
         onS1GrdRecortes={runS1GrdRecortes}
+        onS1SarIndexStacks={runS1SarIndexStacks}
+        s1SarStacksBusy={!!s1SarStacksTaskId}
         onS2IndexStacks={runS2IndexStacks}
         clusterElbowLoading={clusterElbowLoading}
         clusterGmmLoading={clusterGmmLoading}

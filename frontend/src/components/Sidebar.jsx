@@ -58,6 +58,8 @@ export default function Sidebar({
   recortePipelineBusy,
   onS2L2aRecortes,
   onS1GrdRecortes,
+  onS1SarIndexStacks,
+  s1SarStacksBusy = false,
   onS2IndexStacks,
   clusterElbowLoading,
   clusterGmmLoading,
@@ -202,7 +204,9 @@ export default function Sidebar({
           onOpenPreproGallery={onOpenPreproGallery}
           onOpenPreproClusterViz={onOpenPreproClusterViz}
           recortePipelineBusy={recortePipelineBusy}
+          s1SarStacksBusy={s1SarStacksBusy}
           onS1GrdRecortes={onS1GrdRecortes}
+          onS1SarIndexStacks={onS1SarIndexStacks}
         />
       ) : null}
 
