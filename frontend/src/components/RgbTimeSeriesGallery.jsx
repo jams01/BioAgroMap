@@ -77,6 +77,19 @@ function formatSceneDateLabel(sortKey) {
   return "—";
 }
 
+/** Nombre visible ``PS_dd/mm/yy`` desde ``PS_dd-mm-yy.tif`` o ``PS_dd-mm-yy_N.tif``. */
+function labelPsRgbFromBasename(basename) {
+  const m = String(basename || "").match(/^PS_(\d{2})-(\d{2})-(\d{2})(?:_(\d+))?\.tif$/i);
+  if (m) {
+    const suf = m[4] ? ` (${m[4]})` : "";
+    return `PS_${m[1]}/${m[2]}/${m[3]}${suf}`;
+  }
+  return basename || "—";
+}
+
+/** Mismo criterio que el backend para inventario PS: solo ``PS_dd-mm-yy.tif`` (opc. ``_N``). */
+const PS_RECORTE_TIF_BASENAME_RE = /^PS_\d{2}-\d{2}-\d{2}(?:_\d+)?\.tif$/i;
+
 const RECORTE_PREVIEW_PLACEHOLDER =
   "data:image/svg+xml," +
   encodeURIComponent(
@@ -110,6 +123,21 @@ const ZOOM_STEP = 0.1;
 /** Orden de índices en la galería (mismo que estimación). */
 const GALLERY_INDEX_KEYS = ["NDVI", "EVI", "NDWI", "CIre", "MCARI"];
 
+/** PlanetScope ``indecesPS/`` (mismo orden que catálogo estimación). */
+const GALLERY_INDEX_KEYS_PS = [
+  "NDVI",
+  "NDWI",
+  "MSAVI2",
+  "MTVI2",
+  "VARI",
+  "TGI",
+  "KNDVI",
+  "GIYI",
+  "MCARI",
+  "NDRE",
+  "RSTRUCTURE",
+];
+
 /** Orden de índices SAR en galería (carpetas bajo ``s1indices/``). */
 const GALLERY_S1_SAR_INDEX_KEYS = ["RVI", "RFDI", "VV_VH", "VH_VV", "NRPB"];
 
@@ -121,6 +149,7 @@ function labelS1SarIndexTab(key) {
 
 function labelIndexGalleryTab(galleryVisualMode, key) {
   if (galleryVisualMode === "s1-sar-index") return labelS1SarIndexTab(key);
+  if (key === "RSTRUCTURE") return "R_structure";
   return key;
 }
 
@@ -157,6 +186,12 @@ function bandIndexForIsoDate(bandDates, iso) {
   return idx >= 0 ? idx + 1 : null;
 }
 
+function withPipelineVariant(url, pipelineVariant) {
+  const v = pipelineVariant === "ps" ? "ps" : "s2";
+  const sep = url.includes("?") ? "&" : "?";
+  return `${url}${sep}pipeline_variant=${encodeURIComponent(v)}`;
+}
+
 /**
  * @param {"view" | "indexSelect" | "timeSeriesSelect" | "s1SarIndexSelect" | "s1SarTimeSeriesSelect"} mode - view: galería; indexSelect: S2 índices; s1SarIndexSelect: índices SAR (s1prepoceso); s1SarTimeSeriesSelect: fechas desde s1indices/
  * @param {"rgb" | "index" | "s1-sar-index" | "s1-vv" | "s1-vh" | "s1-index"} [galleryVisualMode] - view: RGB L2A, índices S2, índices SAR (``s1indices/``), o VV/VH/índice S1
@@ -175,6 +210,7 @@ export default function RgbTimeSeriesGallery({
   onSelectedIndicesChange,
   projectId,
   token,
+  pipelineVariant = "s2",
 }) {
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -228,7 +264,11 @@ export default function RgbTimeSeriesGallery({
     !s1SarTsMode &&
     (galleryVisualMode === "index" || galleryVisualMode === "s1-sar-index");
   const indexGalleryKeys =
-    galleryVisualMode === "s1-sar-index" ? GALLERY_S1_SAR_INDEX_KEYS : GALLERY_INDEX_KEYS;
+    galleryVisualMode === "s1-sar-index"
+      ? GALLERY_S1_SAR_INDEX_KEYS
+      : pipelineVariant === "ps"
+        ? GALLERY_INDEX_KEYS_PS
+        : GALLERY_INDEX_KEYS;
   const s1VizMode = isS1GalleryVisualMode(galleryVisualMode);
 
   useEffect(() => {
@@ -262,9 +302,14 @@ export default function RgbTimeSeriesGallery({
         const loaded = [];
 
         if (mode === "indexSelect" || mode === "timeSeriesSelect") {
-          const invRes = await api.get(`/preprocess/recortes-inventory/${projectId}`);
+          const invRes = await api.get(
+            withPipelineVariant(`/preprocess/recortes-inventory/${projectId}`, pipelineVariant)
+          );
           if (cancelled) return;
-          const rows = invRes.data?.items || [];
+          let rows = invRes.data?.items || [];
+          if (pipelineVariant === "ps") {
+            rows = rows.filter((r) => PS_RECORTE_TIF_BASENAME_RE.test(String(r.basename || "")));
+          }
           for (const row of rows) {
             if (cancelled) break;
             const basename = row.basename;
@@ -274,7 +319,10 @@ export default function RgbTimeSeriesGallery({
             const sk = row.sort_key || "";
             const url = rid
               ? `${base}/raster/${projectId}/${rid}/preview?v=${rid}`
-              : `${base}/preprocess/recortes-preview/${projectId}?path=${encodeURIComponent(rel)}`;
+              : withPipelineVariant(
+                  `${base}/preprocess/recortes-preview/${projectId}?path=${encodeURIComponent(rel)}`,
+                  pipelineVariant
+                );
             let objectUrl = null;
             try {
               const resp = await fetch(url, {
@@ -375,7 +423,9 @@ export default function RgbTimeSeriesGallery({
             });
           }
         } else if (mode === "view" && galleryVisualMode === "index") {
-          const invRes = await api.get(`/preprocess/index-stacks-inventory/${projectId}`);
+          const invRes = await api.get(
+            withPipelineVariant(`/preprocess/index-stacks-inventory/${projectId}`, pipelineVariant)
+          );
           if (cancelled) return;
           const allRows = invRes.data?.items || [];
           const normIdx = (k) => String(k || "").toUpperCase();
@@ -400,9 +450,12 @@ export default function RgbTimeSeriesGallery({
             for (const spec of specs) {
               if (cancelled) break;
               const bandQ = spec.band != null ? `&band=${spec.band}` : "";
-              const url = `${base}/preprocess/index-stacks-preview/${projectId}?path=${encodeURIComponent(
-                row.relative_path
-              )}${bandQ}&index_palette=1`;
+              const url = withPipelineVariant(
+                `${base}/preprocess/index-stacks-preview/${projectId}?path=${encodeURIComponent(
+                  row.relative_path
+                )}${bandQ}&index_palette=1`,
+                pipelineVariant
+              );
               try {
                 const resp = await fetch(url, {
                   headers: { Authorization: `Bearer ${token}` },
@@ -565,6 +618,58 @@ export default function RgbTimeSeriesGallery({
               /* omitir capa sin preview */
             }
           }
+        } else if (mode === "view" && galleryVisualMode === "rgb" && pipelineVariant === "ps") {
+          const invRes = await api.get(
+            withPipelineVariant(`/preprocess/recortes-inventory/${projectId}`, "ps")
+          );
+          if (cancelled) return;
+          const rowsRaw = invRes.data?.items || [];
+          const rows = [...rowsRaw]
+            .filter((r) => PS_RECORTE_TIF_BASENAME_RE.test(String(r.basename || "")))
+            .sort((a, b) => {
+            const ka = String(a.sort_key || "").slice(0, 10);
+            const kb = String(b.sort_key || "").slice(0, 10);
+            const c = ka.localeCompare(kb);
+            if (c !== 0) return c;
+            return String(a.relative_path || "").localeCompare(String(b.relative_path || ""));
+          });
+          for (const row of rows) {
+            if (cancelled) break;
+            const basename = row.basename;
+            const rel = row.relative_path || basename;
+            if (!rel) continue;
+            const rid = row.raster_layer_id;
+            // Siempre ``recortes-preview`` + pipeline PS: enlaza por ``source_name`` al COG de la capa
+            // (mismo GeoTIFF que el mapa) y unifica estirado RGB con el backend de preproceso.
+            const url = withPipelineVariant(
+              `${base}/preprocess/recortes-preview/${projectId}?path=${encodeURIComponent(rel)}`,
+              "ps"
+            );
+            let objectUrl = null;
+            try {
+              const resp = await fetch(url, {
+                headers: { Authorization: `Bearer ${token}` },
+                cache: "no-store",
+              });
+              if (resp.ok) {
+                const blob = await resp.blob();
+                objectUrl = URL.createObjectURL(blob);
+                blobUrlsRef.current.push(objectUrl);
+              }
+            } catch (_) {
+              /* placeholder */
+            }
+            const label = labelPsRgbFromBasename(basename);
+            loaded.push({
+              id: `psrgb:${rel}`,
+              rasterLayerId: rid ?? null,
+              basename,
+              relativePath: rel,
+              label,
+              src: objectUrl,
+              raw: row,
+            });
+          }
         } else {
           const res = await api.get(`/raster/${projectId}`);
           if (cancelled) return;
@@ -655,6 +760,7 @@ export default function RgbTimeSeriesGallery({
     activeIndexKey,
     s1VvPalette,
     s1PrepSigmaPol,
+    pipelineVariant,
   ]);
 
   useEffect(() => {
@@ -770,6 +876,29 @@ export default function RgbTimeSeriesGallery({
       onTimeSeries({ s1SarDates: uniq });
       return;
     }
+    if (mode === "timeSeriesSelect") {
+      const rasterLayerIds = [];
+      const recorteRelativePaths = [];
+      for (const sid of selectedIds) {
+        const item = items.find((i) => i.id === sid);
+        if (!item) continue;
+        if (item.rasterLayerId != null && Number.isFinite(Number(item.rasterLayerId))) {
+          rasterLayerIds.push(Number(item.rasterLayerId));
+        }
+        if (item.relativePath) {
+          recorteRelativePaths.push(String(item.relativePath));
+        }
+      }
+      const uniqIds = [...new Set(rasterLayerIds)].sort((a, b) => a - b);
+      const uniqPaths = [...new Set(recorteRelativePaths)];
+      if (uniqIds.length === 0 && uniqPaths.length === 0) return;
+      onTimeSeries({
+        rasterLayerIds: uniqIds,
+        recorteRelativePaths: uniqPaths,
+        pipelineVariant: pipelineVariant === "ps" ? "ps" : "s2",
+      });
+      return;
+    }
     const ids = [];
     for (const sid of selectedIds) {
       const item = items.find((i) => i.id === sid);
@@ -791,7 +920,9 @@ export default function RgbTimeSeriesGallery({
 
   const title =
     mode === "timeSeriesSelect"
-      ? "Escenas L2A (6 bandas) — series de tiempo"
+      ? pipelineVariant === "ps"
+        ? "Escenas PlanetScope (8 bandas) — series de tiempo"
+        : "Escenas L2A (6 bandas) — series de tiempo"
       : mode === "s1SarTimeSeriesSelect"
         ? "Fechas índices SAR (s1indices/) — series de tiempo"
         : mode === "s1SarIndexSelect"
@@ -812,10 +943,18 @@ export default function RgbTimeSeriesGallery({
 
   const subtitle =
     mode === "timeSeriesSelect" ? (
-      <>
-        Pulsa cada miniatura para incluir o excluir escenas. Cuando termines, pulsa{" "}
-        <strong>Series de tiempo</strong> para graficar NDVI, EVI, NDWI, CIre y MCARI (fechas en el eje X).
-      </>
+      pipelineVariant === "ps" ? (
+        <>
+          Mismo flujo que Sentinel-2: elige escenas en <code>recortesPS/</code>, luego pulsa{" "}
+          <strong>Series de tiempo</strong>. Se grafican los índices del catálogo PS (NDVI, NDWI, MSAVI2, …) con
+          valores 0–1 (min-max por escena) y fechas en el eje X.
+        </>
+      ) : (
+        <>
+          Pulsa cada miniatura para incluir o excluir escenas. Cuando termines, pulsa{" "}
+          <strong>Series de tiempo</strong> para graficar NDVI, EVI, NDWI, CIre y MCARI (fechas en el eje X).
+        </>
+      )
     ) : mode === "s1SarTimeSeriesSelect" ? (
       <>
         Selecciona las <strong>fechas</strong> presentes en <strong>los cinco</strong> stacks bajo{" "}
@@ -875,13 +1014,17 @@ export default function RgbTimeSeriesGallery({
     mode === "s1SarTimeSeriesSelect"
       ? "No hay cinco stacks SAR con al menos una fecha en común en s1indices/. Ejecuta el paso 3 (Estimar índices SAR) primero."
       : mode === "indexSelect" || mode === "timeSeriesSelect"
-        ? "No hay GeoTIFF L2A (6+ bandas) en la carpeta recortes/. Ejecuta el paso 1 (Procesar recortes L2A)."
+        ? pipelineVariant === "ps"
+          ? "No hay GeoTIFF PlanetScope (8+ bandas, nombre PS_*.tif) en recortesPS/. Ejecuta el paso 1 (recortes PS)."
+          : "No hay GeoTIFF L2A (6+ bandas) en la carpeta recortes/. Ejecuta el paso 1 (Procesar recortes L2A)."
         : mode === "s1SarIndexSelect"
           ? "No hay escenas con par VV+VH (Sigma0_VV_db.img y Sigma0_VH_db.img en la misma carpeta) en s1prepoceso/."
         : showIndexSwitcher
           ? galleryVisualMode === "s1-sar-index"
             ? `No hay stack de ${labelS1SarIndexTab(activeIndexKey)} en disco (carpeta s1indices/${activeIndexKey}/). Estima índices SAR en la pestaña Sentinel-1 (paso 3).`
-            : `No hay stack de ${activeIndexKey} en disco (carpeta indices/${activeIndexKey}/). Usa el paso 3 (Estimar índices).`
+            : pipelineVariant === "ps"
+              ? `No hay stack de ${activeIndexKey} en disco (carpeta indecesPS/${activeIndexKey}/). Usa el paso 3 (Estimar índices) en esta pestaña Planet.`
+              : `No hay stack de ${activeIndexKey} en disco (carpeta indices/${activeIndexKey}/). Usa el paso 3 (Estimar índices).`
           : mode === "view" && galleryVisualMode === "s1-vv"
             ? s1PrepSigmaPol === "vh"
               ? "No hay Sigma0_VH_db.img en la carpeta s1prepoceso/ del proyecto (o no se pudo leer ninguno)."

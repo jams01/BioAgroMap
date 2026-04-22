@@ -536,7 +536,8 @@ body {
   text-overflow: ellipsis;
 }
 
-.top-tabs > button.top-tab-s1 {
+.top-tabs > button.top-tab-s1,
+.top-tabs > button.top-tab-ps {
   flex: 0 0 auto;
   min-width: 0;
   padding: 8px 4px;

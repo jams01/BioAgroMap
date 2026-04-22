@@ -19,6 +19,12 @@ from app.api.v1.helpers import (
     project_downloads_dir,
     validate_upload_size,
 )
+from app.services.preprocess_pipeline_variant import (
+    indices_dir_name,
+    is_planetscope_ps_recorte_filename,
+    normalize_pipeline_variant,
+    recortes_dir_name,
+)
 from app.services.raster_geo import render_raster_preview_png
 from app.core.config import settings
 from app.db.session import get_db
@@ -31,6 +37,7 @@ from app.schemas.schemas import (
     S1GrdRecorteRequest,
     S1SarIndexStacksRequest,
     S1SarTimeSeriesRequest,
+    PsPlanetZipExtractRequest,
     S2IndexStacksRequest,
     S2L2aRecorteRequest,
     StackRequest,
@@ -38,6 +45,10 @@ from app.schemas.schemas import (
 )
 
 router = APIRouter()
+
+
+def _pipeline_variant_query(pipeline_variant: str = Query("s2", description='s2 → recortes/indices; ps → recortesPS/indecesPS')) -> str:
+    return normalize_pipeline_variant(pipeline_variant)
 
 
 @router.post("/preprocess/download")
@@ -595,11 +606,12 @@ def get_recortes_inventory(
     project_id: int,
     db: Session = Depends(get_db),
     tenant_id: int = Depends(tenant_from_jwt),
+    pipeline_variant: str = Depends(_pipeline_variant_query),
 ):
     """
-    Lista GeoTIFF bajo ``recortes/`` (incl. subcarpetas) con ≥6 bandas, sin depender de capas en BD.
+    Lista GeoTIFF bajo ``recortes/`` o ``recortesPS/`` (incl. subcarpetas) con ≥6 bandas, sin depender de capas en BD.
     ``relative_path`` identifica el archivo para preview y tareas; ``basename`` es solo el nombre final.
-    ``raster_layer_id`` si una capa apunta al mismo path resuelto o al mismo nombre en la raíz.
+    ``raster_layer_id`` si una capa apunta al mismo path resuelto, al mismo basename, o a ``metadata.source_name`` con ese basename (p. ej. TIF en ``rasters/`` copiado desde ``recortesPS/``).
     """
     from app.services.s2_vegetation_indices import sort_key_from_path_or_meta
 
@@ -607,17 +619,29 @@ def get_recortes_inventory(
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    recortes_root = _tenant_storage(tenant_id, project_id, "recortes")
+    rec_kind = recortes_dir_name(pipeline_variant)
+    recortes_root = _tenant_storage(tenant_id, project_id, rec_kind)
     if not recortes_root.is_dir():
-        return {"items": []}
+        return {"items": [], "recortes_dir": rec_kind, "pipeline_variant": normalize_pipeline_variant(pipeline_variant)}
 
     resolved_to_rid: dict[Path, int] = {}
     name_to_rid: dict[str, int] = {}
+    # Capa en ``rasters/`` suele tener otro path que el TIF en ``recortesPS/``; enlazar por ``source_name`` original.
+    source_basename_to_rid: dict[str, int] = {}
     for r in (
         db.query(RasterLayer)
         .filter(RasterLayer.project_id == project_id, RasterLayer.tenant_id == tenant_id)
         .all()
     ):
+        om = r.raster_metadata or {}
+        sn = (om.get("source_name") or "").strip()
+        if sn:
+            sb = Path(sn).name
+            if sb.lower().endswith(".tif") and "_cog" not in sb.lower():
+                source_basename_to_rid.setdefault(sb, r.id)
+        nm = (r.name or "").strip()
+        if nm and is_planetscope_ps_recorte_filename(nm):
+            source_basename_to_rid.setdefault(Path(nm).name, r.id)
         for attr in (r.file_path, r.cog_path):
             if not attr:
                 continue
@@ -635,11 +659,14 @@ def get_recortes_inventory(
             if bn not in name_to_rid:
                 name_to_rid[bn] = r.id
 
+    pv = normalize_pipeline_variant(pipeline_variant)
     items: list[dict] = []
     for p in sorted(recortes_root.rglob("*.tif")):
         if "_cog" in p.name.lower():
             continue
         if not p.is_file():
+            continue
+        if pv == "ps" and not is_planetscope_ps_recorte_filename(p.name):
             continue
         rel = _safe_relative_under(recortes_root, p)
         if rel is None:
@@ -660,6 +687,8 @@ def get_recortes_inventory(
         rid = resolved_to_rid.get(p.resolve())
         if rid is None:
             rid = name_to_rid.get(p.name)
+        if rid is None:
+            rid = source_basename_to_rid.get(p.name)
         items.append(
             {
                 "basename": p.name,
@@ -670,7 +699,11 @@ def get_recortes_inventory(
             }
         )
     items.sort(key=lambda x: (x["sort_key"], x["relative_path"]))
-    return {"items": items}
+    return {
+        "items": items,
+        "recortes_dir": rec_kind,
+        "pipeline_variant": normalize_pipeline_variant(pipeline_variant),
+    }
 
 
 @router.get("/preprocess/recortes-preview/{project_id}")
@@ -688,13 +721,14 @@ def get_recorte_preview_disk(
     ),
     db: Session = Depends(get_db),
     tenant_id: int = Depends(tenant_from_jwt),
+    pipeline_variant: str = Depends(_pipeline_variant_query),
 ):
-    """Vista RGB (B04,B03,B02) desde un archivo en ``recortes/`` sin capa en BD."""
+    """Vista RGB desde GeoTIFF en ``recortes/`` o ``recortesPS/``: S2 típico B04,B03,B02 → 3,2,1; Planet PS (≥6 bandas) → 6,4,2."""
     project = db.query(Project).filter(Project.id == project_id, Project.tenant_id == tenant_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    root = _tenant_storage(tenant_id, project_id, "recortes").resolve()
+    root = _tenant_storage(tenant_id, project_id, recortes_dir_name(pipeline_variant)).resolve()
 
     tif_path: Path
     basename: str
@@ -704,7 +738,7 @@ def get_recorte_preview_disk(
             raise HTTPException(status_code=400, detail="Ruta relativa no válida")
         full_path = (root / rel).resolve()
         if not full_path.is_file() or not full_path.is_relative_to(root):
-            raise HTTPException(status_code=404, detail="GeoTIFF no encontrado en recortes/")
+            raise HTTPException(status_code=404, detail="GeoTIFF no encontrado en la carpeta de recortes del variant")
         tif_path = full_path
         basename = tif_path.name
     elif name is not None and str(name).strip():
@@ -716,12 +750,18 @@ def get_recorte_preview_disk(
             raise HTTPException(status_code=400, detail="Usa solo el nombre del archivo")
         tif_path = (root / basename).resolve()
         if not tif_path.is_file() or tif_path.parent != root:
-            raise HTTPException(status_code=404, detail="GeoTIFF no encontrado en recortes/")
+            raise HTTPException(status_code=404, detail="GeoTIFF no encontrado en la carpeta de recortes del variant")
     else:
         raise HTTPException(status_code=400, detail="Indica path o name")
 
     if "_cog" in basename.lower():
         raise HTTPException(status_code=400, detail="Usa el GeoTIFF fuente, no el COG")
+
+    if normalize_pipeline_variant(pipeline_variant) == "ps" and not is_planetscope_ps_recorte_filename(basename):
+        raise HTTPException(
+            status_code=400,
+            detail="Solo se admiten GeoTIFF con nombre PS_dd-mm-yy.tif (p. ej. PS_23-03-26.tif).",
+        )
 
     meta: dict | None = None
     layer_match: RasterLayer | None = None
@@ -755,14 +795,51 @@ def get_recorte_preview_disk(
                     break
             if layer_match is not None:
                 break
+    # COG en ``rasters/`` suele tener otro nombre; enlazar por ``source_name`` o nombre de capa PS_*.tif.
+    if layer_match is None:
+        for r in layers_q:
+            om = r.raster_metadata or {}
+            sn = (om.get("source_name") or "").strip()
+            if sn and Path(sn).name == basename:
+                layer_match = r
+                break
+    if layer_match is None:
+        for r in layers_q:
+            nm = (r.name or "").strip()
+            if nm and Path(nm).name == basename and is_planetscope_ps_recorte_filename(nm):
+                layer_match = r
+                break
 
     if layer_match is not None:
         meta = layer_match.raster_metadata or {}
     else:
         meta = {"preview_rgb_bands": [3, 2, 1], "s2_l2a_recorte": True}
 
+    render_path = tif_path
+    if normalize_pipeline_variant(pipeline_variant) == "ps":
+        if layer_match is not None:
+            try:
+                rp = _existing_raster_path(layer_match)
+                if rp.is_file():
+                    render_path = rp
+            except HTTPException:
+                pass
+        try:
+            with rasterio.open(render_path) as _chk:
+                n_ps = int(_chk.count)
+        except Exception:
+            n_ps = 0
+        if n_ps >= 6:
+            # Metadatos mínimos (evita ``s2_index_stack`` u otros flags heredados que alteran la RGB).
+            # Mismo archivo que el mapa cuando hay capa: COG en ``rasters/`` vía ``_existing_raster_path``.
+            meta = {
+                "preview_rgb_bands": [6, 4, 2],
+                "planetscope_composite": True,
+                "source_name": basename,
+            }
+
     try:
-        png = render_raster_preview_png(tif_path, layer_metadata=meta)
+        png = render_raster_preview_png(render_path, layer_metadata=meta)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"No se pudo generar la vista previa: {exc}") from exc
     return Response(
@@ -784,8 +861,12 @@ def _canonical_s1_sar_index_dir_name(raw: str) -> str | None:
     return u if u in _S1_SAR_INDEX_DIR_KEYS else None
 
 
+# Carpetas bajo indices/ (S2) o indecesPS/ (Planet); debe coincidir con normalize_requested_indices.
+_PS_INDEX_DIR_NAMES = frozenset({"MSAVI2", "MTVI2", "VARI", "TGI", "KNDVI", "GIYI"})
+
+
 def _canonical_index_dir_name(raw: str) -> str | None:
-    """Carpeta bajo indices/ → clave estable (mismo criterio que el pipeline). Acepta cualquier capitalización."""
+    """Carpeta bajo indices/ o indecesPS/ → clave estable (mismo criterio que el pipeline)."""
     u = raw.strip().upper()
     if u == "NDVI":
         return "NDVI"
@@ -797,6 +878,12 @@ def _canonical_index_dir_name(raw: str) -> str | None:
         return "CIre"
     if u == "MCARI":
         return "MCARI"
+    if u == "NDRE":
+        return "NDRE"
+    if u == "RSTRUCTURE":
+        return "RSTRUCTURE"
+    if u in _PS_INDEX_DIR_NAMES:
+        return u
     return None
 
 
@@ -805,15 +892,17 @@ def get_index_stacks_inventory(
     project_id: int,
     db: Session = Depends(get_db),
     tenant_id: int = Depends(tenant_from_jwt),
+    pipeline_variant: str = Depends(_pipeline_variant_query),
 ):
-    """Lista GeoTIFF multibanda en ``indices/<INDICE>/`` (salida del pipeline de estimación, sin capas en BD)."""
+    """Lista GeoTIFF multibanda en ``indices/`` o ``indecesPS/`` (salida del pipeline de estimación, sin capas en BD)."""
     project = db.query(Project).filter(Project.id == project_id, Project.tenant_id == tenant_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    indices_root = _tenant_storage(tenant_id, project_id, "indices")
+    idx_kind = indices_dir_name(pipeline_variant)
+    indices_root = _tenant_storage(tenant_id, project_id, idx_kind)
     if not indices_root.is_dir():
-        return {"items": []}
+        return {"items": [], "indices_dir": idx_kind, "pipeline_variant": normalize_pipeline_variant(pipeline_variant)}
 
     items: list[dict] = []
     seen_rel: set[str] = set()
@@ -857,7 +946,11 @@ def get_index_stacks_inventory(
             }
         )
     items.sort(key=lambda x: (x["index_key"], x["relative_path"]))
-    return {"items": items}
+    return {
+        "items": items,
+        "indices_dir": idx_kind,
+        "pipeline_variant": normalize_pipeline_variant(pipeline_variant),
+    }
 
 
 @router.get("/preprocess/index-stacks-preview/{project_id}")
@@ -881,6 +974,7 @@ def get_index_stack_preview_disk(
     ),
     db: Session = Depends(get_db),
     tenant_id: int = Depends(tenant_from_jwt),
+    pipeline_variant: str = Depends(_pipeline_variant_query),
 ):
     """PNG de una banda de un stack de índices en disco (no requiere RasterLayer)."""
     project = db.query(Project).filter(Project.id == project_id, Project.tenant_id == tenant_id).first()
@@ -890,7 +984,7 @@ def get_index_stack_preview_disk(
     if stack_relpath is None or not str(stack_relpath).strip():
         raise HTTPException(status_code=400, detail="Indica path")
 
-    root = _tenant_storage(tenant_id, project_id, "indices").resolve()
+    root = _tenant_storage(tenant_id, project_id, indices_dir_name(pipeline_variant)).resolve()
     rel = Path(str(stack_relpath).strip().replace("\\", "/"))
     if rel.is_absolute() or ".." in rel.parts:
         raise HTTPException(status_code=400, detail="Ruta relativa no válida")
@@ -1066,8 +1160,8 @@ def preprocess_s2_index_stacks(
     tenant_id: int = Depends(tenant_from_jwt),
 ):
     """
-    Genera stacks multibanda (una banda por escena/fecha) por índice en ``indices/<INDICE>/``.
-    Requiere GeoTIFF de recorte L2A de 6 bandas en ``recortes/``.
+    Genera stacks multibanda (una banda por escena/fecha) por índice en ``indices/<INDICE>/`` o ``indecesPS/``.
+    Requiere GeoTIFF de recorte L2A de 6 bandas en ``recortes/`` o ``recortesPS/``.
     """
     from app.services.s2_vegetation_indices import normalize_requested_indices
     from app.tasks.jobs import s2_index_stacks_pipeline
@@ -1076,7 +1170,9 @@ def preprocess_s2_index_stacks(
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    pairs = normalize_requested_indices(payload.indices)
+    pairs = normalize_requested_indices(
+        payload.indices, pipeline_variant=normalize_pipeline_variant(payload.pipeline_variant)
+    )
     if not pairs:
         raise HTTPException(
             status_code=400,
@@ -1099,6 +1195,7 @@ def preprocess_s2_index_stacks(
             settings.database_url,
             rids_eff,
             fnames,
+            normalize_pipeline_variant(payload.pipeline_variant),
         )
     except Exception as exc:
         raise HTTPException(
@@ -1148,14 +1245,16 @@ def preprocess_vegetation_time_series(
     tenant_id: int = Depends(tenant_from_jwt),
 ):
     """
-    Por cada escena L2A (6 bandas): índices normalizados min-max por escena, apilados en el tiempo.
-    Devuelve **series por píxel** (muestreadas) y agregados por escena en ``points``.
+    Por cada escena L2A (6 bandas) o PlanetScope (8 bandas): índices normalizados min-max por escena,
+    apilados en el tiempo. Devuelve **series por píxel** (muestreadas) y agregados por escena en ``points``.
     """
     from pathlib import Path
 
     from app.services.s2_vegetation_indices import (
         build_normalized_index_volumes_for_paths,
+        is_eight_band_ps_stack_file,
         is_six_band_s2_stack_file,
+        sort_key_from_path_or_meta,
         sort_key_from_raster_layer,
     )
 
@@ -1163,33 +1262,88 @@ def preprocess_vegetation_time_series(
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    INDEX_LIST = ("NDVI", "EVI", "NDWI", "CIre", "MCARI")
-    scenes: list[tuple[str, Path, int]] = []
+    pv = normalize_pipeline_variant(payload.pipeline_variant)
+    index_list_s2 = ("NDVI", "EVI", "NDWI", "CIre", "MCARI")
+    index_list_ps = (
+        "NDVI",
+        "NDWI",
+        "MSAVI2",
+        "MTVI2",
+        "VARI",
+        "TGI",
+        "KNDVI",
+        "GIYI",
+        "MCARI",
+        "NDRE",
+        "RSTRUCTURE",
+    )
+    index_list = index_list_ps if pv == "ps" else index_list_s2
+    rec_label = recortes_dir_name(pv)
 
-    for rid in sorted(set(payload.raster_layer_ids)):
+    def _valid_scene_file(path: Path, meta: dict | None) -> bool:
+        if pv == "ps":
+            return is_eight_band_ps_stack_file(path, meta)
+        return is_six_band_s2_stack_file(path, meta)
+
+    by_path_key: dict[str, tuple[str, Path, int | None]] = {}
+    rec_root = _tenant_storage(tenant_id, payload.project_id, rec_label)
+
+    for rel in sorted({str(x).strip().replace("\\", "/") for x in (payload.recorte_relative_paths or []) if x}):
+        if not rel or ".." in rel:
+            raise HTTPException(status_code=400, detail=f"Ruta de recorte no válida: {rel}")
+        p = (rec_root / rel).resolve()
+        if _safe_relative_under(rec_root, p) is None:
+            raise HTTPException(status_code=400, detail=f"Ruta fuera de {rec_label}/: {rel}")
+        if not p.is_file():
+            raise HTTPException(status_code=400, detail=f"No existe el recorte en {rec_label}/: {rel}")
+        if not _valid_scene_file(p, None):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"El archivo no es válido para series (PlanetScope 8 bandas en {rec_label}/)"
+                    if pv == "ps"
+                    else f"El archivo no es válido para series (L2A 6 bandas en {rec_label}/): {rel}"
+                ),
+            )
+        sk = sort_key_from_path_or_meta(p, None) or ""
+        by_path_key[str(p.resolve())] = (sk, p, None)
+
+    for rid in sorted(set(payload.raster_layer_ids or [])):
         r = _get_project_raster(db, tenant_id, payload.project_id, rid)
         path = Path(_existing_raster_path(r))
         meta = r.raster_metadata or {}
-        if not is_six_band_s2_stack_file(path, meta):
+        if not _valid_scene_file(path, meta):
             raise HTTPException(
                 status_code=400,
-                detail=f"La capa {rid} no es un recorte L2A de 6 bandas (índices sobre el mismo GeoTIFF).",
+                detail=(
+                    f"La capa {rid} no es un recorte válido para series (PlanetScope 8 bandas)."
+                    if pv == "ps"
+                    else f"La capa {rid} no es un recorte L2A de 6 bandas (índices sobre el mismo GeoTIFF)."
+                ),
             )
         sk = sort_key_from_raster_layer(r)
-        scenes.append((sk or "", path, rid))
+        key = str(path.resolve())
+        prev = by_path_key.get(key)
+        if prev:
+            by_path_key[key] = (prev[0], path, rid)
+        else:
+            by_path_key[key] = (sk or "", path, rid)
 
-    scenes.sort(key=lambda x: (str(x[0]), x[2]))
+    if not by_path_key:
+        raise HTTPException(status_code=400, detail="No hay escenas válidas seleccionadas.")
+
+    scenes = sorted(by_path_key.values(), key=lambda x: (str(x[0]), x[2] if x[2] is not None else -1))
     paths = [p for _, p, _ in scenes]
 
     try:
-        stacked, _ref = build_normalized_index_volumes_for_paths(paths, INDEX_LIST)
+        stacked, _ref = build_normalized_index_volumes_for_paths(paths, index_list, pipeline_variant=pv)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"No se pudieron alinear índices en el tiempo: {exc!s}") from exc
 
     points: list[dict] = []
     for t, (date, _path, rid) in enumerate(scenes):
-        row: dict = {"date": date, "raster_layer_id": rid, "by_index": {}}
-        for ix in INDEX_LIST:
+        row: dict = {"date": date, "raster_layer_id": rid if rid is not None else 0, "by_index": {}}
+        for ix in index_list:
             plane = stacked[ix][t]
             fin = plane[np.isfinite(plane)]
             if fin.size == 0:
@@ -1210,7 +1364,7 @@ def preprocess_vegetation_time_series(
         points.append(row)
 
     temporal_stats: dict = {}
-    for ix in INDEX_LIST:
+    for ix in index_list:
         vals = [p["by_index"][ix]["mean"] for p in points if p["by_index"][ix]["mean"] is not None]
         if not vals:
             temporal_stats[ix] = {"mean": None, "std": None}
@@ -1223,23 +1377,31 @@ def preprocess_vegetation_time_series(
 
     series_by_index, n_sampled, n_valid = _sample_pixel_series_from_stacks(
         stacked,
-        INDEX_LIST,
+        index_list,
         payload.max_pixel_series,
         payload.random_seed,
     )
 
+    agg_desc = (
+        "Índice por escena normalizado min-max en toda la imagen; series por píxel en valores [0,1]. "
+        "Muestreo aleatorio de píxeles válidos en todas las fechas."
+    )
+    if pv == "ps":
+        agg_desc = (
+            "PlanetScope (8 bandas): mismos índices que el catálogo PS; normalización min-max por escena; "
+            "series por píxel en [0,1]. Muestreo aleatorio de píxeles válidos en todas las fechas."
+        )
+
     return {
         "project_id": payload.project_id,
+        "pipeline_variant": pv,
         "dates": [d for d, _, _ in scenes],
-        "indices": list(INDEX_LIST),
+        "indices": list(index_list),
         "points": points,
         "temporal_stats": temporal_stats,
         "spatial_aggregation": {
             "method": "all_valid_pixels",
-            "description": (
-                "Índice por escena normalizado min-max en toda la imagen; series por píxel en valores [0,1]. "
-                "Muestreo aleatorio de píxeles válidos en todas las fechas."
-            ),
+            "description": agg_desc,
         },
         "per_pixel": {
             "n_sampled": n_sampled,
@@ -1510,6 +1672,33 @@ def preprocess_sentinel1_recortes(
     return {"status": "queued", "task_id": async_result.id}
 
 
+@router.post("/preprocess/ps-planetscope-zip-extract")
+def preprocess_ps_planetscope_zip_extract(
+    payload: PsPlanetZipExtractRequest,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(tenant_from_jwt),
+):
+    """
+    Por cada ``*.zip`` en ``rasterPS/`` del proyecto: extrae ``composite.tif`` y metadatos (XML, JSON,
+    ``composite_udm2.tif``) a ``recortesPS/``; el composite se renombra a ``PS_dd-mm-yy.tif`` usando
+    ``YYYYMMDD_`` del nombre de un XML en la misma carpeta interna.
+    """
+    from app.tasks.jobs import ps_planet_zip_extract_pipeline
+
+    project = db.query(Project).filter(Project.id == payload.project_id, Project.tenant_id == tenant_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    try:
+        async_result = ps_planet_zip_extract_pipeline.delay(tenant_id, payload.project_id)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"No se pudo encolar la extracción PS. ¿Redis y worker Celery? {exc!s}",
+        ) from exc
+    return {"status": "queued", "task_id": async_result.id}
+
+
 @router.post("/preprocess/s2-l2a-recortes")
 def preprocess_s2_l2a_recortes(
     payload: S2L2aRecorteRequest,
@@ -1568,6 +1757,7 @@ def preprocess_s2_l2a_recortes(
             settings.database_url,
             payload.product_names,
             payload.source_subpath,
+            normalize_pipeline_variant(payload.pipeline_variant),
         )
     except Exception as exc:
         raise HTTPException(

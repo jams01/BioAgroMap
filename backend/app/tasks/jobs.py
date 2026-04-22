@@ -68,7 +68,9 @@ def apply_raster_cog(file_path: str, output_path: str, raster_layer_id: int | No
     out_path = Path(output_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
+    band_count = 0
     with rasterio.open(src_path) as src:
+        band_count = int(src.count)
         profile = src.profile.copy()
         profile.update({"driver": "GTiff", "compress": "lzw", "tiled": True})
         data = src.read()
@@ -82,6 +84,40 @@ def apply_raster_cog(file_path: str, output_path: str, raster_layer_id: int | No
     else:
         meta_update["status"] = "no_georef"
         meta_update["bounds_error"] = "El archivo no tiene CRS geográfico; no se puede calcular extensión ni vista previa."
+
+    if raster_layer_id is not None and band_count >= 6:
+        try:
+            from sqlalchemy import create_engine
+            from sqlalchemy.orm import sessionmaker
+
+            from app.models.models import RasterLayer
+            from app.services.preprocess_pipeline_variant import is_planetscope_ps_recorte_filename
+
+            engine = create_engine(settings.database_url)
+            Session = sessionmaker(bind=engine)
+            db = Session()
+            try:
+                r = db.query(RasterLayer).filter(RasterLayer.id == raster_layer_id).first()
+                if r:
+                    om = r.raster_metadata or {}
+                    label = (om.get("source_name") or r.name or "").strip()
+                    ps_basename: str | None = None
+                    if is_planetscope_ps_recorte_filename(label):
+                        ps_basename = Path(label).name
+                    elif is_planetscope_ps_recorte_filename(src_path.name):
+                        ps_basename = src_path.name
+                    if ps_basename:
+                        meta_update["preview_rgb_bands"] = [6, 4, 2]
+                        meta_update["planetscope_composite"] = True
+                        meta_update["bands_display_note"] = (
+                            "PlanetScope color natural: R=band6, G=band4, B=band2"
+                        )
+                        if not (om.get("source_name") or "").strip():
+                            meta_update["source_name"] = ps_basename
+            finally:
+                db.close()
+        except Exception:
+            logger.exception("No se pudo anotar preview_rgb PlanetScope (apply_raster_cog)")
 
     if raster_layer_id is not None:
         _merge_raster_metadata(settings.database_url, raster_layer_id, meta_update)
@@ -336,6 +372,7 @@ def s2_l2a_recortes_pipeline(
     db_url: str,
     product_names: list[str] | None = None,
     source_subpath: str | None = None,
+    pipeline_variant: str = "s2",
 ) -> dict:
     """
     Por cada ZIP L2A o carpeta .SAFE: un GeoTIFF de 6 bandas (B02,B03,B04,B05@10m,B08,B11@10m),
@@ -355,6 +392,7 @@ def s2_l2a_recortes_pipeline(
     from app.services.raster_clip import clip_raster_by_wkt_polygon
     from app.services.raster_geo import bounds_wgs84_from_path
     from app.services.s2_composites import s2_acquisition_date_label
+    from app.services.preprocess_pipeline_variant import normalize_pipeline_variant, recortes_dir_name
     from app.services.sentinel_safe import (
         S2_BANDS_10M_ORDER,
         find_safe_ancestor,
@@ -428,10 +466,12 @@ def s2_l2a_recortes_pipeline(
                 }
 
         rasters_dir = _tenant_storage(tenant_id, project_id, "rasters")
-        recortes_root = _tenant_storage(tenant_id, project_id, "recortes")
+        recorte_kind = recortes_dir_name(pipeline_variant)
+        recortes_root = _tenant_storage(tenant_id, project_id, recorte_kind)
         logger.info(
-            "s2_l2a_recortes: recortes_root=%s (salida plana: <producto>_S2_B02-B11_recorte.tif)",
+            "s2_l2a_recortes: recortes_root=%s (salida plana: <producto>_S2_B02-B11_recorte.tif) variant=%s",
             recortes_root,
+            normalize_pipeline_variant(pipeline_variant),
         )
 
         results: list[dict] = []
@@ -510,7 +550,8 @@ def s2_l2a_recortes_pipeline(
                     "preview_rgb_bands": list(S2_TRUE_COLOR_RGB_BANDS_1BASED),
                     "bands_display_note": "Vista mapa: R=B04, G=B03, B=B02",
                     "recorte_rel_path": ".",
-                    "recorte_storage_layout": "flat_root",
+                    "recorte_storage_layout": recorte_kind,
+                    "preprocess_pipeline_variant": normalize_pipeline_variant(pipeline_variant),
                     "from_zip": kind == "zip",
                     "s2_composite": True,
                     "composite_kind": "true_color",
@@ -802,6 +843,7 @@ def s2_index_stacks_pipeline(
     db_url: str,
     raster_layer_ids: list[int] | None = None,
     recorte_filenames: list[str] | None = None,
+    pipeline_variant: str = "s2",
 ) -> dict:
     """
     Por cada índice seleccionado: stack multibanda (una banda por escena) desde recortes L2A 6 bandas.
@@ -812,13 +854,15 @@ def s2_index_stacks_pipeline(
 
     from app.api.v1.helpers import _tenant_storage
     from app.models.models import RasterLayer
+    from app.services.preprocess_pipeline_variant import indices_dir_name, normalize_pipeline_variant, recortes_dir_name
     from app.services.s2_vegetation_indices import (
+        PS_INDEX_MIN_BANDS,
         discover_recorte_scenes,
         discover_recorte_scenes_by_filenames,
         normalize_index_minmax_per_scene,
         normalize_requested_indices,
         process_scene_index,
-        read_six_bands_aligned,
+        read_index_stack_base_profile,
         write_multiband_stack,
         yyyymmdd_range_str,
     )
@@ -829,9 +873,13 @@ def s2_index_stacks_pipeline(
     outputs: dict[str, str] = {}
     errors: list[dict[str, str]] = []
     try:
-        recortes_root = _tenant_storage(tenant_id, project_id, "recortes")
+        recortes_root = _tenant_storage(tenant_id, project_id, recortes_dir_name(pipeline_variant))
+        pv = normalize_pipeline_variant(pipeline_variant)
+        min_bands = PS_INDEX_MIN_BANDS if pv == "ps" else 6
         if recorte_filenames:
-            scenes = discover_recorte_scenes_by_filenames(recortes_root, recorte_filenames)
+            scenes = discover_recorte_scenes_by_filenames(
+                recortes_root, recorte_filenames, min_bands=min_bands
+            )
         else:
             scenes = discover_recorte_scenes(
                 db,
@@ -839,21 +887,25 @@ def s2_index_stacks_pipeline(
                 tenant_id,
                 recortes_root,
                 raster_layer_ids=raster_layer_ids,
+                min_bands=min_bands,
             )
         if not scenes:
             return {
                 "ok": False,
                 "error": "no_scenes",
-                "message": "No hay escenas válidas: capas raster 6+ bandas en el mapa, o GeoTIFF en recortes/. Ejecuta el recorte L2A o revisa las capas seleccionadas.",
+                "message": (
+                    "No hay escenas válidas: capas raster o GeoTIFF en la carpeta de recortes del variant "
+                    f"(se requieren ≥{min_bands} bandas). Ejecuta el recorte L2A / extrae PS o revisa la selección."
+                ),
                 "outputs": {},
                 "errors": [],
             }
 
-        pairs = normalize_requested_indices(indices)
+        pairs = normalize_requested_indices(indices, pipeline_variant=pipeline_variant)
         if not pairs:
             return {"ok": False, "error": "no_indices", "message": "Ningún índice válido.", "outputs": {}, "errors": []}
 
-        indices_root = _tenant_storage(tenant_id, project_id, "indices")
+        indices_root = _tenant_storage(tenant_id, project_id, indices_dir_name(pipeline_variant))
 
         for folder_name, calc_name in pairs:
             bands_stack: list = []
@@ -863,7 +915,7 @@ def s2_index_stacks_pipeline(
 
             for sort_key, tif_path in scenes:
                 try:
-                    arr = process_scene_index(tif_path, calc_name)
+                    arr = process_scene_index(tif_path, calc_name, pipeline_variant=pipeline_variant)
                     arr = normalize_index_minmax_per_scene(arr)
                     bands_stack.append(arr)
                     dates_used.append(sort_key)
@@ -878,8 +930,7 @@ def s2_index_stacks_pipeline(
             dir_out = indices_root / folder_name
             dir_out.mkdir(parents=True, exist_ok=True)
 
-            _, base_prof = read_six_bands_aligned(scenes[0][1])
-            base_prof.update(count=1, dtype="float32")
+            base_prof = read_index_stack_base_profile(scenes[0][1], pipeline_variant=pipeline_variant)
             dmin, dmax = yyyymmdd_range_str(dates_used)
             out_path = dir_out / f"{folder_name}_{dmin}_{dmax}.tif"
 
@@ -1052,3 +1103,18 @@ def s1_sar_index_stacks_pipeline(
         }
     finally:
         db.close()
+
+
+@celery_app.task(name="tasks.ps_planet_zip_extract_pipeline")
+def ps_planet_zip_extract_pipeline(tenant_id: int, project_id: int) -> dict:
+    """
+    Lee ``*.zip`` en ``rasterPS/``, extrae ``composite.tif`` y XML hermanos a ``recortesPS/``,
+    renombrando el composite a ``PS_dd-mm-yy.tif`` según prefijo YYYYMMDD_ en un XML.
+    """
+    from app.api.v1.helpers import _tenant_storage
+    from app.services.planet_ps_extract import extract_planet_zips_from_raster_ps
+    from app.services.preprocess_pipeline_variant import planet_zip_dir_name
+
+    raster_root = _tenant_storage(tenant_id, project_id, planet_zip_dir_name())
+    out_root = _tenant_storage(tenant_id, project_id, "recortesPS")
+    return extract_planet_zips_from_raster_ps(raster_root, out_root)

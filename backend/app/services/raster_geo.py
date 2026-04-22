@@ -32,6 +32,7 @@ try:
 except ImportError:  # pragma: no cover
     Image = None
 
+from app.services.preprocess_pipeline_variant import is_planetscope_ps_recorte_filename
 from app.services.sentinel_safe import bounds_from_sibling_jp2_tci, bounds_wgs84_from_sentinel_safe
 
 
@@ -238,6 +239,11 @@ def _resolve_rgb_band_indexes(
             b0 = max(1, min(int(prgb[0]), src_count))
             return [b0, b0, b0]
         return [1, 1, 1]
+    if meta.get("planetscope_composite") and src_count >= 6:
+        return [6, 4, 2]
+    lab = (meta.get("source_name") or "").strip()
+    if src_count >= 6 and lab and is_planetscope_ps_recorte_filename(lab):
+        return [6, 4, 2]
     prgb = meta.get("preview_rgb_bands")
     if isinstance(prgb, (list, tuple)) and len(prgb) == 3:
         return [int(prgb[0]), int(prgb[1]), int(prgb[2])]
@@ -303,6 +309,53 @@ def _index_scalar_to_rgb_colormap(t_01: np.ndarray, cmap_name: str = "RdYlGn") -
     return rgb
 
 
+def _is_planet_true_color_preview(meta: dict, src_count: int) -> bool:
+    """RGB 6-4-2 sobre composite Planet (8 bandas típ.) o ≥6 bandas con nombre PS_."""
+    if src_count < 6:
+        return False
+    if meta.get("planetscope_composite"):
+        return True
+    lab = (meta.get("source_name") or "").strip()
+    return bool(lab and is_planetscope_ps_recorte_filename(lab))
+
+
+def _stretch_band_to_u8_planet_true_color(band: np.ndarray) -> np.ndarray:
+    """
+    Color natural PlanetScope (R=band6, G=band4, B=band2).
+
+    Los composites Analytic suelen ir como DN acotado (cientos–miles), no como BOA Sentinel ×10000.
+    EO Browser / scripts de Planet usan ``sample.red / 3000`` (misma escala por canal); aquí
+    detectamos DN alto (p99 > 50) y aplicamos esa división; si ya parece reflectancia 0–1, se
+    escala por 0.3. Luego estirado por percentiles y gamma suave para miniaturas legibles.
+    """
+    x = band.astype(np.float64)
+    finite = np.isfinite(x)
+    if not np.any(finite):
+        return np.zeros(x.shape, dtype=np.uint8)
+
+    p99 = float(np.nanpercentile(x[finite], 99.0))
+    r = np.full_like(x, np.nan, dtype=np.float64)
+    # No recortar a [0, 1] antes del percentil: DN altos (>3000) quedarían todos en 1.0 y la RGB se lava.
+    if p99 > 50.0:
+        r[finite] = x[finite] / 3000.0
+    else:
+        r[finite] = x[finite] / 0.3
+
+    lo, hi = np.nanpercentile(r, [2.0, 98.0])
+    if not (math.isfinite(lo) and math.isfinite(hi)) or hi <= lo:
+        lo, hi = np.nanpercentile(r, [1.0, 99.0])
+    if not (math.isfinite(lo) and math.isfinite(hi)) or hi <= lo:
+        lo = float(np.nanmin(r))
+        hi = float(np.nanmax(r))
+    if hi <= lo:
+        hi = lo + 1e-9
+
+    y = (r - lo) / (hi - lo)
+    y = np.clip(np.where(np.isfinite(y), y, 0.0), 0.0, 1.0)
+    y = np.power(y, 0.9)
+    return (y * 255.0).astype(np.uint8)
+
+
 def _stretch_band_to_u8_sentinel_friendly(band: np.ndarray) -> np.ndarray:
     """
     Estira reflectancia a 8 bits. Sentinel-2 L2A suele venir como DN ~0–10000 o float 0–1;
@@ -313,11 +366,11 @@ def _stretch_band_to_u8_sentinel_friendly(band: np.ndarray) -> np.ndarray:
     if not np.any(finite):
         return np.zeros(x.shape, dtype=np.uint8)
 
-    # Reflectancia típica ×10000 (BOA) o valores grandes → pasar a ~0–1 para visualizar
+    # Reflectancia típica ×10000 (BOA) o valores grandes → pasar a reflectancia ~0–1+.
+    # No recortar a [0,1] antes del estirado: p. ej. NIR (DN>10000) quedaría todo en 1.0 y la RGB se ve pálida / lavada.
     p99 = float(np.nanpercentile(x[finite], 99.0))
     if p99 > 1.8:
         x = np.where(finite, x / 10000.0, np.nan)
-        x = np.clip(x, 0.0, 1.0)
     else:
         x = np.where(finite, x, np.nan)
 
@@ -422,6 +475,8 @@ def render_raster_preview_png(
     """
     Genera PNG RGB para superponer en el mapa (MapLibre image source).
     Recortes S2: color natural (p. ej. R=B04,G=B03,B=B02 en 4/6 bandas).
+    PlanetScope (``planetscope_composite`` o nombre ``PS_*.tif``): bandas 6,4,2 y estirado
+    tipo EO Browser (``/ 3000`` sobre DN típico + percentiles).
 
     Stacks de índices (`s2_index_stack`): la paleta (RdYlGn, etc.) solo si
     ``index_palette_request`` es True (p. ej. galería «Visual NDVI»). Sin ese flag,
@@ -435,7 +490,9 @@ def render_raster_preview_png(
     if not isinstance(cmap_name, str) or not cmap_name.strip():
         cmap_name = "RdYlGn"
 
+    src_count = 0
     with rasterio.open(path) as src:
+        src_count = int(src.count)
         h, w = src.height, src.width
         scale = min(1.0, float(max_dim) / max(h, w))
         out_h = max(1, int(h * scale))
@@ -497,8 +554,10 @@ def render_raster_preview_png(
         arr = np.concatenate([arr, arr[:1]], axis=0)
 
     rgb = np.zeros((arr.shape[1], arr.shape[2], 3), dtype=np.uint8)
+    use_planet_tc = _is_planet_true_color_preview(meta, src_count)
+    stretch = _stretch_band_to_u8_planet_true_color if use_planet_tc else _stretch_band_to_u8_sentinel_friendly
     for i in range(3):
-        rgb[:, :, i] = _stretch_band_to_u8_sentinel_friendly(arr[i])
+        rgb[:, :, i] = stretch(arr[i])
 
     img = Image.fromarray(rgb, mode="RGB")
     buf = io.BytesIO()

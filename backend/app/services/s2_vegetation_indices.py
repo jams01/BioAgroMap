@@ -1,5 +1,6 @@
 """
-Índices de vegetación a partir de GeoTIFF Sentinel-2 L2A de 6 bandas (orden B02,B03,B04,B05,B08,B11).
+Índices de vegetación a partir de GeoTIFF Sentinel-2 L2A de 6 bandas (orden B02,B03,B04,B05,B08,B11)
+o PlanetScope PS de 8 bandas (índices con equivalencias b,g,r,ir → PS2,4,6,8).
 """
 
 from __future__ import annotations
@@ -23,12 +24,26 @@ S2_BAND_ORDER = ("B02", "B03", "B04", "B05", "B08", "B11")
 
 EPS = 1e-9
 
+# PlanetScope 8 bandas (1-based). Para índices tabulados: b≈S2 B02, g≈S2 B03, r≈S2 B04, ir≈S2 B8a.
+PS_INDEX_MIN_BANDS = 8
+_PS_BGRI_BANDS_1BASED = {"b": 2, "g": 4, "r": 6, "ir": 8}
 
-def normalize_requested_indices(raw: list[str]) -> list[tuple[str, str]]:
+
+def normalize_requested_indices(
+    raw: list[str],
+    *,
+    pipeline_variant: str = "s2",
+) -> list[tuple[str, str]]:
     """
-    Lista desde API/UI → pares (nombre carpeta / prefijo archivo, nombre para compute_index_arrays).
-    Si la lista contiene «TODOS», equivale a los cinco índices.
+    Lista desde API/UI → pares (nombre carpeta / prefijo archivo, nombre para compute_*_index_arrays).
+
+    ``pipeline_variant=ps``: NDVI, NDWI, MSAVI2, MTVI2, VARI, TGI, KNDVI, GIYI, MCARI, NDRE, RSTRUCTURE (NDRE/NDVI, estructura de dosel).
+    ``pipeline_variant=s2``: NDVI, EVI, NDWI (NIR–SWIR), CIre, MCARI.
     """
+    from app.services.preprocess_pipeline_variant import normalize_pipeline_variant
+
+    if normalize_pipeline_variant(pipeline_variant) == "ps":
+        return _normalize_requested_indices_ps(raw)
     if raw and any(str(s).strip().upper() == "TODOS" for s in raw):
         raw = ["NDVI", "EVI", "NDWI", "CIre", "MCARI"]
     out: list[tuple[str, str]] = []
@@ -48,6 +63,52 @@ def normalize_requested_indices(raw: list[str]) -> list[tuple[str, str]]:
             out.append(("CIre", "CIRE"))
         elif u == "MCARI":
             out.append(("MCARI", "MCARI"))
+    seen: set[str] = set()
+    uniq: list[tuple[str, str]] = []
+    for folder, calc in out:
+        if folder not in seen:
+            seen.add(folder)
+            uniq.append((folder, calc))
+    return uniq
+
+
+def _normalize_requested_indices_ps(raw: list[str]) -> list[tuple[str, str]]:
+    if raw and any(str(s).strip().upper() == "TODOS" for s in raw):
+        raw = [
+            "NDVI",
+            "NDWI",
+            "MSAVI2",
+            "MTVI2",
+            "VARI",
+            "TGI",
+            "KNDVI",
+            "GIYI",
+            "MCARI",
+            "NDRE",
+            "RSTRUCTURE",
+        ]
+    key_map = {
+        "NDVI": ("NDVI", "NDVI"),
+        "NDWI": ("NDWI", "NDWI"),
+        "MSAVI2": ("MSAVI2", "MSAVI2"),
+        "MTVI2": ("MTVI2", "MTVI2"),
+        "VARI": ("VARI", "VARI"),
+        "TGI": ("TGI", "TGI"),
+        "KNDVI": ("KNDVI", "KNDVI"),
+        "GIYI": ("GIYI", "GIYI"),
+        "MCARI": ("MCARI", "MCARI"),
+        "NDRE": ("NDRE", "NDRE"),
+        "RSTRUCTURE": ("RSTRUCTURE", "RSTRUCTURE"),
+    }
+    out: list[tuple[str, str]] = []
+    for s in raw:
+        if not s or not str(s).strip():
+            continue
+        u = str(s).strip().upper()
+        if u == "TODOS":
+            continue
+        if u in key_map:
+            out.append(key_map[u])
     seen: set[str] = set()
     uniq: list[tuple[str, str]] = []
     for folder, calc in out:
@@ -142,6 +203,128 @@ def compute_index_arrays(
     raise ValueError(f"Índice no soportado: {index_name}")
 
 
+def read_planet_eight_bands_bgri(tif_path: Path) -> tuple[dict[str, np.ndarray], dict]:
+    """
+    Lee bandas PS alineadas a la rejilla de la banda 2 (azul).
+
+    Claves: ``b``, ``g``, ``r``, ``ir`` (PS2,4,6,8); ``green_i``, ``yellow`` (PS3, PS5); ``red_edge`` (PS7).
+    """
+    with rasterio.open(tif_path) as src:
+        if int(src.count) < PS_INDEX_MIN_BANDS:
+            raise ValueError(
+                f"PlanetScope: se requieren {PS_INDEX_MIN_BANDS} bandas en {tif_path}, hay {src.count}"
+            )
+        ref_h, ref_w = src.height, src.width
+        ref_transform = src.transform
+        ref_crs = src.crs
+        ref_band = src.read(_PS_BGRI_BANDS_1BASED["b"]).astype(np.float32)
+        out: dict[str, np.ndarray] = {}
+        for key in ("b", "g", "r", "ir"):
+            bi = _PS_BGRI_BANDS_1BASED[key]
+            arr = src.read(bi).astype(np.float32)
+            if arr.shape == ref_band.shape:
+                out[key] = arr
+            else:
+                logger.warning(
+                    "Remuestreando PS banda %s a rejilla banda2 en %s: shape %s → (%s,%s)",
+                    bi,
+                    tif_path.name,
+                    arr.shape,
+                    ref_h,
+                    ref_w,
+                )
+                out[key] = _resample_to_match(
+                    arr,
+                    src.transform,
+                    src.crs,
+                    ref_h,
+                    ref_w,
+                    ref_transform,
+                    ref_crs,
+                )
+        for key, bi in (("green_i", 3), ("yellow", 5), ("red_edge", 7)):
+            arr = src.read(bi).astype(np.float32)
+            if arr.shape == ref_band.shape:
+                out[key] = arr
+            else:
+                logger.warning(
+                    "Remuestreando PS banda %s a rejilla banda2 en %s: shape %s → (%s,%s)",
+                    bi,
+                    tif_path.name,
+                    arr.shape,
+                    ref_h,
+                    ref_w,
+                )
+                out[key] = _resample_to_match(
+                    arr,
+                    src.transform,
+                    src.crs,
+                    ref_h,
+                    ref_w,
+                    ref_transform,
+                    ref_crs,
+                )
+        profile = src.profile.copy()
+        profile.update(count=PS_INDEX_MIN_BANDS, dtype="float32")
+        return out, profile
+
+
+def compute_ps_index_arrays(bgri: dict[str, np.ndarray], index_name: str) -> np.ndarray:
+    """
+    Índices PS según tabla (ir=NIR PS8, r=Rojo PS6, g=Verde PS4, b=Azul PS2; equivalencias S2 B8a,B4,B3,B02).
+    """
+    b = bgri["b"]
+    g = bgri["g"]
+    r = bgri["r"]
+    ir = bgri["ir"]
+    name = index_name.upper()
+    if name == "NDVI":
+        return _safe_div(ir - r, ir + r).astype(np.float32)
+    if name == "NDRE":
+        # (NIR − RedEdge) / (NIR + RedEdge); NIR=PS8, RedEdge=PS7.
+        red_e = bgri["red_edge"]
+        return _safe_div(ir - red_e, ir + red_e).astype(np.float32)
+    if name == "RSTRUCTURE":
+        # NDRE / NDVI (custom, estructura de dosel); NDRE y NDVI con las mismas bandas PS que arriba.
+        red_e = bgri["red_edge"]
+        ndre = _safe_div(ir - red_e, ir + red_e)
+        ndvi = _safe_div(ir - r, ir + r)
+        return _safe_div(ndre, ndvi).astype(np.float32)
+    if name == "NDWI":
+        # NDWI tipo McFeeters (verde − NIR) / (verde + NIR); no el NDWI NIR−SWIR de Sentinel.
+        return _safe_div(g - ir, g + ir).astype(np.float32)
+    if name == "MSAVI2":
+        inner = (2.0 * ir + 1.0) ** 2 - 8.0 * (ir - r)
+        sqrt_term = np.sqrt(np.maximum(inner, 0.0))
+        return ((2.0 * ir + 1.0 - sqrt_term) / 2.0).astype(np.float32)
+    if name == "MTVI2":
+        num = 1.5 * (1.2 * (ir - g) - 2.5 * (r - g))
+        sr = np.sqrt(np.maximum(r, 0.0))
+        inner = (2.0 * ir + 1.0) ** 2 - (6.0 * ir - 5.0 * sr) - 0.5
+        den = np.sqrt(np.maximum(inner, 0.0))
+        return _safe_div(num, den).astype(np.float32)
+    if name == "VARI":
+        return _safe_div(g - r, g + r - b).astype(np.float32)
+    if name == "TGI":
+        return (((120.0 * (r - b)) - (190.0 * (r - g))) / 2.0).astype(np.float32)
+    if name == "KNDVI":
+        # EO Browser / Sentinel Hub: tanh(((nir-red)/(nir+red))^2)
+        ndvi = _safe_div(ir - r, ir + r)
+        return np.tanh(np.square(ndvi)).astype(np.float32)
+    if name == "GIYI":
+        # Green–Yellow (custom): (GreenI − Yellow) / (GreenI + Yellow); PS3=Green I, PS5=Yellow.
+        green_i = bgri["green_i"]
+        yel = bgri["yellow"]
+        return _safe_div(green_i - yel, green_i + yel).astype(np.float32)
+    if name == "MCARI":
+        # [(RedEdge − Red) − 0.2(RedEdge − Green)] · (RedEdge / Red); PS7≈S2 B5, PS6≈B4, PS4≈B3.
+        red_e = bgri["red_edge"]
+        t1 = (red_e - r) - 0.2 * (red_e - g)
+        t2 = red_e / (r + EPS)
+        return (t1 * t2).astype(np.float32)
+    raise ValueError(f"Índice PS no soportado: {index_name}")
+
+
 def _resample_to_match(
     src_arr: np.ndarray,
     src_transform: Any,
@@ -207,7 +390,14 @@ def read_six_bands_aligned(tif_path: Path) -> tuple[dict[str, np.ndarray], dict]
 def process_scene_index(
     tif_path: Path,
     index_name: str,
+    *,
+    pipeline_variant: str = "s2",
 ) -> np.ndarray:
+    from app.services.preprocess_pipeline_variant import normalize_pipeline_variant
+
+    if normalize_pipeline_variant(pipeline_variant) == "ps":
+        bgri, _ = read_planet_eight_bands_bgri(tif_path)
+        return compute_ps_index_arrays(bgri, index_name)
     bands, _ = read_six_bands_aligned(tif_path)
     return compute_index_arrays(bands, index_name)
 
@@ -215,6 +405,8 @@ def process_scene_index(
 def build_normalized_index_volumes_for_paths(
     scene_paths: list[Path],
     index_list: tuple[str, ...],
+    *,
+    pipeline_variant: str = "s2",
 ) -> tuple[dict[str, np.ndarray], dict]:
     """
     Por cada escena: lee 6 bandas, calcula cada índice y normaliza min-max por escena.
@@ -224,18 +416,24 @@ def build_normalized_index_volumes_for_paths(
     """
     if not scene_paths:
         raise ValueError("scene_paths vacío")
+    from app.services.preprocess_pipeline_variant import normalize_pipeline_variant
+
     vols: dict[str, list[np.ndarray]] = {ix: [] for ix in index_list}
     ref_profile: dict | None = None
+    pv = normalize_pipeline_variant(pipeline_variant)
 
     for t, path in enumerate(scene_paths):
-        bands, profile = read_six_bands_aligned(path)
+        if pv == "ps":
+            _, profile = read_planet_eight_bands_bgri(path)
+        else:
+            _, profile = read_six_bands_aligned(path)
         if t == 0:
             ref_profile = profile
         assert ref_profile is not None
         rh = int(ref_profile["height"])
         rw = int(ref_profile["width"])
         for ix in index_list:
-            raw = compute_index_arrays(bands, ix)
+            raw = process_scene_index(path, ix, pipeline_variant=pipeline_variant)
             norm = normalize_index_minmax_per_scene(raw)
             if t > 0 and norm.shape != (rh, rw):
                 norm = _resample_to_match(
@@ -314,12 +512,22 @@ def write_multiband_stack(
 
 
 _STEM_DATE = re.compile(r"_(20\d{2})(\d{2})(\d{2})T")
+_PS_COMPOSITE_STEM = re.compile(r"^PS_(\d{2})-(\d{2})-(\d{2})(?:_(\d+))?$", re.IGNORECASE)
 
 
 def sort_key_from_path_or_meta(path: Path, metadata: dict | None) -> str | None:
     if metadata and metadata.get("s2_sort_key"):
         return str(metadata["s2_sort_key"])
     stem = path.stem
+    pm = _PS_COMPOSITE_STEM.match(stem)
+    if pm:
+        d, mo, yy = int(pm.group(1)), int(pm.group(2)), int(pm.group(3))
+        yfull = 2000 + yy if yy < 80 else 1900 + yy
+        base = f"{yfull:04d}-{mo:02d}-{d:02d}"
+        suf = pm.group(4)
+        if suf:
+            return f"{base}-{int(suf):04d}"
+        return base
     m = _STEM_DATE.search(stem)
     if m:
         return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
@@ -352,6 +560,12 @@ def is_six_band_s2_stack_file(fp: Path, meta: dict | None) -> bool:
     if is_legacy_s2_zip_band_raster(meta):
         return False
     m = meta or {}
+    if m.get("planetscope_composite"):
+        try:
+            with rasterio.open(fp) as src:
+                return int(src.count) >= PS_INDEX_MIN_BANDS
+        except Exception:
+            return False
     if m.get("s2_six_band_stack") or m.get("s2_l2a_recorte"):
         return True
     if m.get("source") == "sentinel-2" and m.get("type") == "download":
@@ -364,6 +578,38 @@ def is_six_band_s2_stack_file(fp: Path, meta: dict | None) -> bool:
             return int(src.count) >= 6
     except Exception:
         return False
+
+
+def is_eight_band_ps_stack_file(fp: Path, meta: dict | None) -> bool:
+    """Candidato a recorte PlanetScope para índices (8 bandas, convención PS o metadatos)."""
+    from app.api.v1.helpers import is_legacy_s2_zip_band_raster
+    from app.services.preprocess_pipeline_variant import is_planetscope_ps_recorte_filename
+
+    if is_legacy_s2_zip_band_raster(meta):
+        return False
+    try:
+        with rasterio.open(fp) as src:
+            if int(src.count) < PS_INDEX_MIN_BANDS:
+                return False
+    except Exception:
+        return False
+    m = meta or {}
+    if m.get("planetscope_composite"):
+        return True
+    return is_planetscope_ps_recorte_filename(fp.name)
+
+
+def read_index_stack_base_profile(tif_path: Path, *, pipeline_variant: str = "s2") -> dict:
+    """Perfil GeoTIFF (una banda float32) para escribir stacks de índices; mismo raster que el pipeline."""
+    from app.services.preprocess_pipeline_variant import normalize_pipeline_variant
+
+    if normalize_pipeline_variant(pipeline_variant) == "ps":
+        _, prof = read_planet_eight_bands_bgri(tif_path)
+    else:
+        _, prof = read_six_bands_aligned(tif_path)
+    prof = prof.copy()
+    prof.update(count=1, dtype="float32")
+    return prof
 
 
 def yyyymmdd_range_str(dates_iso: list[str]) -> tuple[str, str]:
@@ -380,6 +626,8 @@ def discover_recorte_scenes(
     tenant_id: int,
     recortes_root: Path,
     raster_layer_ids: list[int] | None = None,
+    *,
+    min_bands: int = 6,
 ) -> list[tuple[str, Path]]:
     """
     Escenas candidatas (fecha ISO sort_key, ruta TIF ≥6 bandas tipo L2A recorte). Sin duplicar rutas.
@@ -424,6 +672,20 @@ def discover_recorte_scenes(
                 )
                 continue
         meta = r.raster_metadata or {}
+        try:
+            with rasterio.open(fp) as _src:
+                nbc = int(_src.count)
+        except Exception:
+            continue
+        if nbc < min_bands:
+            logger.warning(
+                "Capa raster %s omitida (requiere ≥%s bandas, hay %s): %s",
+                r.id,
+                min_bands,
+                nbc,
+                fp.name,
+            )
+            continue
         if not is_six_band_s2_stack_file(fp, meta):
             logger.warning("Capa raster %s omitida (no es stack L2A 6+ bandas): %s", r.id, fp.name)
             continue
@@ -450,6 +712,13 @@ def discover_recorte_scenes(
             rp = p.resolve()
             if rp in by_path:
                 continue
+            try:
+                with rasterio.open(p) as _src:
+                    n_disk = int(_src.count)
+            except Exception:
+                continue
+            if n_disk < min_bands:
+                continue
             if not is_six_band_s2_stack_file(p, None):
                 continue
             sk = sort_key_from_path_or_meta(p, None)
@@ -466,10 +735,12 @@ def discover_recorte_scenes(
 def discover_recorte_scenes_by_filenames(
     recortes_root: Path,
     filenames: list[str],
+    *,
+    min_bands: int = 6,
 ) -> list[tuple[str, Path]]:
     """
     Escenas por ruta relativa posix bajo ``recortes_root`` (p. ej. ``escena.tif`` o ``sub/a.tif``).
-    Sin depender de capas en BD; requiere ``*.tif`` (no COG), ≥6 bandas.
+    Sin depender de capas en BD; requiere ``*.tif`` (no COG), ≥``min_bands`` (6 L2A, 8 Planet PS).
     """
     root = recortes_root.resolve()
     if not root.is_dir():
@@ -496,8 +767,10 @@ def discover_recorte_scenes_by_filenames(
         seen.add(key)
         try:
             with rasterio.open(p) as src:
-                if int(src.count) < 6:
-                    logger.warning("discover_recorte_scenes_by_filenames: <6 bandas: %s", s)
+                if int(src.count) < min_bands:
+                    logger.warning(
+                        "discover_recorte_scenes_by_filenames: <%s bandas: %s", min_bands, s
+                    )
                     continue
         except Exception:
             logger.warning("discover_recorte_scenes_by_filenames: no se pudo abrir: %s", s)

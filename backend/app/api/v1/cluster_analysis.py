@@ -6,7 +6,7 @@ import logging
 import os
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.api.deps import tenant_from_jwt
@@ -15,10 +15,20 @@ from app.db.session import get_db
 from app.models.models import Project
 from app.schemas.schemas import ClusterElbowRequest, ClusterGmmRequest
 from app.services import satellite_clustering as sc
+from app.services.preprocess_pipeline_variant import (
+    cluster_output_dir_name,
+    indices_dir_name,
+    normalize_pipeline_variant,
+    recortes_dir_name,
+)
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _cluster_pipeline_variant(pipeline_variant: str = Query("s2", description="s2 o ps (carpetas ClusterPS / indecesPS / rasterPS)")) -> str:
+    return normalize_pipeline_variant(pipeline_variant)
 
 # Cambiar al añadir comportamiento visible (comprobar con GET /cluster-analysis/capabilities).
 CLUSTER_PIPELINE_BUILD = "2026-04-16b.gmm-clear+paths+ui-proof"
@@ -58,10 +68,11 @@ def list_cluster_datasets(
     project_id: int,
     db: Session = Depends(get_db),
     tenant_id: int = Depends(tenant_from_jwt),
+    pipeline_variant: str = Depends(_cluster_pipeline_variant),
 ):
     _project_or_404(db, project_id, tenant_id)
-    recortes = _tenant_storage(tenant_id, project_id, "recortes")
-    indices = _tenant_storage(tenant_id, project_id, "indices")
+    recortes = _tenant_storage(tenant_id, project_id, recortes_dir_name(pipeline_variant))
+    indices = _tenant_storage(tenant_id, project_id, indices_dir_name(pipeline_variant))
     datasets = sc.discover_cluster_datasets(recortes, indices)
     logger.info("cluster datasets project=%s count=%s", project_id, len(datasets))
     return {"datasets": datasets}
@@ -72,13 +83,14 @@ def get_cluster_gmm_results(
     project_id: int,
     db: Session = Depends(get_db),
     tenant_id: int = Depends(tenant_from_jwt),
+    pipeline_variant: str = Depends(_cluster_pipeline_variant),
 ):
     """
-    Lista resultados GMM ya guardados en ``cluster_gmm/`` (misma forma que POST /gmm),
+    Lista resultados GMM ya guardados en ``cluster_gmm/`` o ``ClusterPS/`` (misma forma que POST /gmm),
     regenerando las miniaturas PNG desde los GeoTIFF en disco.
     """
     _project_or_404(db, project_id, tenant_id)
-    out_dir = _tenant_storage(tenant_id, project_id, "cluster_gmm")
+    out_dir = _tenant_storage(tenant_id, project_id, cluster_output_dir_name(pipeline_variant))
     results = sc.load_cluster_gmm_results_from_storage(out_dir)
     return {
         "project_id": project_id,
@@ -97,13 +109,14 @@ def cluster_elbow(
     tenant_id: int = Depends(tenant_from_jwt),
 ):
     _project_or_404(db, payload.project_id, tenant_id)
-    recortes = _tenant_storage(tenant_id, payload.project_id, "recortes")
-    indices = _tenant_storage(tenant_id, payload.project_id, "indices")
+    pv = normalize_pipeline_variant(payload.pipeline_variant)
+    recortes = _tenant_storage(tenant_id, payload.project_id, recortes_dir_name(pv))
+    indices = _tenant_storage(tenant_id, payload.project_id, indices_dir_name(pv))
     datasets = sc.discover_cluster_datasets(recortes, indices)
     if not datasets:
         raise HTTPException(
             status_code=400,
-            detail="No hay GeoTIFF en indices/ ni recorte *_S2_B02-B11_recorte.tif en recortes/.",
+            detail="No hay GeoTIFF en la carpeta de índices ni recortes multibanda válidos en la carpeta de recortes del variant.",
         )
 
     results: list[dict] = []
@@ -145,8 +158,9 @@ def cluster_gmm(
     tenant_id: int = Depends(tenant_from_jwt),
 ):
     _project_or_404(db, payload.project_id, tenant_id)
-    recortes = _tenant_storage(tenant_id, payload.project_id, "recortes")
-    indices = _tenant_storage(tenant_id, payload.project_id, "indices")
+    pv = normalize_pipeline_variant(payload.pipeline_variant)
+    recortes = _tenant_storage(tenant_id, payload.project_id, recortes_dir_name(pv))
+    indices = _tenant_storage(tenant_id, payload.project_id, indices_dir_name(pv))
     datasets = sc.discover_cluster_datasets(recortes, indices)
     if not datasets:
         raise HTTPException(status_code=400, detail="No hay datasets para clustering.")
@@ -159,7 +173,7 @@ def cluster_gmm(
             detail=f"Faltan K en k_by_key para: {sorted(missing)}",
         )
 
-    out_dir = _tenant_storage(tenant_id, payload.project_id, "cluster_gmm")
+    out_dir = _tenant_storage(tenant_id, payload.project_id, cluster_output_dir_name(pv))
     removed_n, out_abs = sc.clear_cluster_gmm_dir(out_dir)
     out_results: list[dict] = []
     logger.info(

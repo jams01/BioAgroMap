@@ -60,6 +60,9 @@ class Settings(BaseSettings):
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000"
     cors_origin_regex: str = ""
     redis_url: str = "redis://localhost:6379/0"
+    # Límite por IP (middleware en ``main.py``); galerías RGB lanzan muchas peticiones en paralelo.
+    rate_limit_window_seconds: int = 60
+    rate_limit_max_requests: int = 600
     ai_service_url: str = "http://localhost:8001"
     storage_path: str = Field(default_factory=_default_storage_path)
     max_upload_mb: int = 4096  # Sentinel-2 ZIP; variable de entorno MAX_UPLOAD_MB tiene prioridad

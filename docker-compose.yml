@@ -32,6 +32,9 @@ services:
       STORAGE_PATH: /data/storage
       SECRET_KEY: super-secret-dev-key
       MAX_UPLOAD_MB: "4096"
+      # Límite global por IP (Redis); subir si galería RGB / muchas miniaturas devuelven 429.
+      RATE_LIMIT_WINDOW_SECONDS: "120"
+      RATE_LIMIT_MAX_REQUESTS: "2000"
       PYTHONDONTWRITEBYTECODE: "1"
       # Volúmenes Docker: forzar polling para que --reload detecte cambios en .py (Linux/Mac/Win).
       WATCHFILES_FORCE_POLLING: "true"

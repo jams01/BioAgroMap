@@ -1,4 +1,4 @@
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
 
 
 class RegisterRequest(BaseModel):
@@ -93,10 +93,17 @@ class S1GrdRecorteRequest(BaseModel):
     )
 
 
+class PsPlanetZipExtractRequest(BaseModel):
+    """Extrae ``composite.tif`` y metadatos desde zips PlanetScope en ``rasterPS/`` hacia ``recortesPS/``."""
+
+    project_id: int
+
+
 class S2L2aRecorteRequest(BaseModel):
     """Recorte de productos Sentinel-2 L2A en carpeta de descargas al polígono del proyecto."""
 
     project_id: int
+    pipeline_variant: str = "s2"
     layer_id: int | None = None
     product_names: list[str] | None = Field(
         default=None,
@@ -128,9 +135,10 @@ class S1SarIndexStacksRequest(BaseModel):
 
 
 class S2IndexStacksRequest(BaseModel):
-    """Stacks multibanda de índices de vegetación desde recortes L2A (6 bandas)."""
+    """Stacks multibanda de índices: L2A 6 bandas (S2) o PlanetScope 8 bandas (PS, carpetas indecesPS/)."""
 
     project_id: int
+    pipeline_variant: str = "s2"
     indices: list[str]
     raster_layer_ids: list[int] | None = Field(
         default=None,
@@ -144,14 +152,22 @@ class S2IndexStacksRequest(BaseModel):
 
 
 class VegetationTimeSeriesRequest(BaseModel):
-    """Series temporales por índice desde recortes L2A (6 bandas).
+    """Series temporales por índice desde recortes L2A (6 bandas) o PlanetScope (8 bandas).
 
     Por defecto devuelve **una serie por píxel** (muestreadas hasta ``max_pixel_series``) además de
     agregados por escena en ``points``.
     """
 
     project_id: int
-    raster_layer_ids: list[int] = Field(..., min_length=1)
+    raster_layer_ids: list[int] = Field(default_factory=list)
+    recorte_relative_paths: list[str] = Field(
+        default_factory=list,
+        description="Rutas relativas dentro de recortes/ o recortesPS/ (mismo ``relative_path`` que el inventario).",
+    )
+    pipeline_variant: str = Field(
+        default="s2",
+        description="s2 → L2A 6 bandas; ps → PlanetScope 8 bandas (índices del catálogo PS).",
+    )
     max_pixel_series: int = Field(
         default=4000,
         ge=1,
@@ -159,6 +175,12 @@ class VegetationTimeSeriesRequest(BaseModel):
         description="Máximo de píxeles para los que se devuelven series completas (todas las fechas).",
     )
     random_seed: int = Field(default=42, description="Semilla para el muestreo aleatorio de píxeles.")
+
+    @model_validator(mode="after")
+    def at_least_one_scene_source(self):
+        if not self.raster_layer_ids and not self.recorte_relative_paths:
+            raise ValueError("Indica raster_layer_ids y/o recorte_relative_paths.")
+        return self
 
 
 class S1SarTimeSeriesRequest(BaseModel):
@@ -186,6 +208,7 @@ class ClusterElbowRequest(BaseModel):
     """Método del codo (KMeans) sobre cada stack de índices y el recorte multibanda."""
 
     project_id: int
+    pipeline_variant: str = "s2"
     k_min: int = 1
     k_max: int = 10
     max_samples: int = 100_000
@@ -196,6 +219,7 @@ class ClusterGmmRequest(BaseModel):
     """Clustering GMM por dataset; ``k_by_key`` debe incluir una K por cada clave devuelta en el codo."""
 
     project_id: int
+    pipeline_variant: str = "s2"
     k_by_key: dict[str, int]
     max_samples: int = 100_000
     random_state: int = 42

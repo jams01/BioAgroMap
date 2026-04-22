@@ -579,20 +579,26 @@ export default function VegetationTimeSeriesCharts({ data }) {
     : null;
 
   const isS1Sar = data?.source === "s1_sar";
+  const isPs = data?.pipeline_variant === "ps";
 
   return (
     <div className="vts-charts-wrap">
       <p className="vts-chart-legend">
         <strong>Leyenda:</strong> líneas tenues = series por píxel (0–1, min-max por{" "}
-        {isS1Sar ? "fecha (SAR)" : "escena (L2A)"}). Eje X: <strong>dd/mm/aa</strong>, etiquetas a{" "}
-        <strong>45°</strong>. Línea <span className="vts-legend-mean">roja</span> = media temporal entre píxeles no
-        atípicos (tras filtro). Línea{" "}
+        {isS1Sar ? "fecha (SAR)" : isPs ? "escena (PlanetScope 8 bandas)" : "escena (L2A)"}). Eje X:{" "}
+        <strong>dd/mm/aa</strong>, etiquetas a <strong>45°</strong>. Línea{" "}
+        <span className="vts-legend-mean">roja</span> = media temporal entre píxeles no atípicos (tras filtro). Línea{" "}
         <span style={{ color: COLOR_TREND_LINE, fontWeight: 600 }}>violeta</span> = tendencia lineal (OLS) sobre esa
         media. «ref. escenas» = medias espaciales por fecha del servidor.{" "}
         {isS1Sar ? (
           <>
             <strong>S1 SAR:</strong> atípicas con IQR Tukey <strong>factor 2.5</strong>; filtro solo si hay{" "}
             <strong>≥10</strong> series (IQR 0 → no se descarta ninguna).
+          </>
+        ) : isPs ? (
+          <>
+            <strong>PlanetScope:</strong> mismos índices que el paso 3; atípicas con IQR Tukey{" "}
+            <strong>factor 1.5</strong>; filtro si hay <strong>≥4</strong> series (IQR 0 → no se descarta ninguna).
           </>
         ) : (
           <>

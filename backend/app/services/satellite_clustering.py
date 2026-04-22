@@ -23,7 +23,22 @@ from sklearn.preprocessing import StandardScaler
 
 logger = logging.getLogger(__name__)
 
-INDEX_KEYS = ("NDVI", "EVI", "NDWI", "CIre", "MCARI")
+# Carpetas bajo indices/ o indecesPS/ (S2 + PS); al descubrir datasets se omiten las que no existan.
+INDEX_KEYS = (
+    "NDVI",
+    "EVI",
+    "NDWI",
+    "CIre",
+    "MCARI",
+    "NDRE",
+    "RSTRUCTURE",
+    "MSAVI2",
+    "MTVI2",
+    "VARI",
+    "TGI",
+    "KNDVI",
+    "GIYI",
+)
 
 # Predicción en una sola lectura si cabe en RAM (~180 MB float32 + trabajo).
 _MAX_FULL_GRID_FLOATS = 45_000_000

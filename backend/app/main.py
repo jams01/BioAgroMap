@@ -58,12 +58,21 @@ async def audit_and_rate_limit(request: Request, call_next):
     r = _get_redis()
     if r:
         key = f"ratelimit:{ip}"
+        window = max(1, int(settings.rate_limit_window_seconds))
+        limit = max(1, int(settings.rate_limit_max_requests))
         try:
             count = r.incr(key)
             if count == 1:
-                r.expire(key, 60)
-            if count > 120:
-                return JSONResponse(status_code=429, content={"detail": "Rate limit exceeded"})
+                r.expire(key, window)
+            if count > limit:
+                return JSONResponse(
+                    status_code=429,
+                    content={
+                        "detail": "Rate limit exceeded",
+                        "retry_after_seconds": window,
+                        "limit_per_window": limit,
+                    },
+                )
         except Exception:
             pass
     response = await call_next(request)

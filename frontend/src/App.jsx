@@ -17,6 +17,14 @@ import {
 } from "./utils/geo";
 import Sidebar from "./components/Sidebar";
 import MapView from "./components/MapView";
+import { INDEX_CATALOG, INDEX_CATALOG_PS } from "./components/PreprocessPanel";
+
+const INDEX_IDS_S2 = new Set(
+  INDEX_CATALOG.filter((o) => o.id !== "TODOS").map((o) => o.id)
+);
+const INDEX_IDS_PS = new Set(
+  INDEX_CATALOG_PS.filter((o) => o.id !== "TODOS").map((o) => o.id)
+);
 
 /** Sentinel-2 ZIP antiguo: una capa por banda (B02…B08). Ocultar; solo vistas RGB/NIR. */
 function isLegacyS2ZipBandRaster(meta) {
@@ -28,6 +36,7 @@ export default function App() {
   const navigate = useNavigate();
   const location = useLocation();
   const mapRef = useRef(null);
+  const indexStacksVariantRef = useRef("s2");
   const [token, setToken] = useState("");
   const [projectId, setProjectId] = useState("");
   const [projects, setProjects] = useState([]);
@@ -46,29 +55,49 @@ export default function App() {
   const [s2Download, setS2Download] = useState(null);
   const [s1Download, setS1Download] = useState(null);
   const [recorteTaskId, setRecorteTaskId] = useState("");
-  /** "s1" | "s2" | "" — para mensajes mientras Celery ejecuta el recorte. */
+  /** "s1" | "s2" | "ps" | "" — para mensajes mientras Celery ejecuta el recorte. */
   const [recorteKind, setRecorteKind] = useState("");
   const [indexStacksTaskId, setIndexStacksTaskId] = useState("");
+  const [psExtractTaskId, setPsExtractTaskId] = useState("");
   const [s1SarStacksTaskId, setS1SarStacksTaskId] = useState("");
   /** Incrementa para abrir la galería «Visual índices» al terminar la estimación. */
   const [visualIndexGalleryKick, setVisualIndexGalleryKick] = useState(0);
+  const [visualIndexGalleryKickPs, setVisualIndexGalleryKickPs] = useState(0);
   const [sidebarTab, setSidebarTab] = useState("admin");
   const [recorteLayerId, setRecorteLayerId] = useState("");
   const [preproGalleryKick, setPreproGalleryKick] = useState(0);
   const [preproClusterVizKick, setPreproClusterVizKick] = useState(0);
+  const [preproClusterVizKickPs, setPreproClusterVizKickPs] = useState(0);
   const [clusterElbowLoading, setClusterElbowLoading] = useState(false);
   const [clusterGmmLoading, setClusterGmmLoading] = useState(false);
   const [clusterElbowResults, setClusterElbowResults] = useState(null);
   const [clusterGmmResults, setClusterGmmResults] = useState(null);
+  const [clusterElbowResultsPs, setClusterElbowResultsPs] = useState(null);
+  const [clusterGmmResultsPs, setClusterGmmResultsPs] = useState(null);
 
   useEffect(() => {
     setS2Download(null);
     setS1Download(null);
     setClusterElbowResults(null);
     setClusterGmmResults(null);
+    setClusterElbowResultsPs(null);
+    setClusterGmmResultsPs(null);
     setRecorteLayerId("");
     setRecorteKind("");
+    setPsExtractTaskId("");
   }, [projectId]);
+
+  useEffect(() => {
+    if (sidebarTab === "prepro") {
+      setSelectedIndices((prev) =>
+        prev.filter((id) => id === "TODOS" || INDEX_IDS_S2.has(id))
+      );
+    } else if (sidebarTab === "ps") {
+      setSelectedIndices((prev) =>
+        prev.filter((id) => id === "TODOS" || INDEX_IDS_PS.has(id))
+      );
+    }
+  }, [sidebarTab]);
 
   useEffect(() => {
     const { access, refresh } = loadStoredAuth();
@@ -230,10 +259,11 @@ export default function App() {
             }
             setMessage(`${head}${aoiTxt}${engTxt}${errTxt}`.trim());
           } else {
+            const psNote = recorteKind === "ps" ? " Salida en rasterPS/." : "";
             setMessage(
               n > 0
-                ? `Proceso de recorte L2A terminado. ${n} GeoTIFF de 6 bandas añadido(s) como capa(s).${errTxt}`
-                : `Proceso de recorte L2A terminado. Sin nuevas capas.${errTxt || " Comprueba inventario L2A y polígono."}`
+                ? `Proceso de recorte L2A terminado.${psNote} ${n} GeoTIFF de 6 bandas añadido(s) como capa(s).${errTxt}`
+                : `Proceso de recorte L2A terminado.${psNote} Sin nuevas capas.${errTxt || " Comprueba inventario L2A y polígono."}`
             );
           }
         } else if (r.data.ready && r.data.state === "FAILURE") {
@@ -245,9 +275,11 @@ export default function App() {
           const label =
             recorteKind === "s1"
               ? "Recorte Sentinel-1"
-              : recorteKind === "s2"
-                ? "Recorte Sentinel-2 L2A"
-                : "Recorte";
+              : recorteKind === "ps"
+                ? "Recorte PS (rasterPS/)"
+                : recorteKind === "s2"
+                  ? "Recorte Sentinel-2 L2A"
+                  : "Recorte";
           setMessage(
             `${label} en curso (Celery: ${st}). Al terminar se mostrará el resultado aquí. Tarea: ${recorteTaskId}`
           );
@@ -284,14 +316,22 @@ export default function App() {
               ? ` Escenas con avisos: ${errList.length}.`
               : "";
           setIndexStacksTaskId("");
+          const pv = indexStacksVariantRef.current === "ps" ? "ps" : "s2";
+          const idxNote = pv === "ps" ? " (indecesPS/)" : "";
           setMessage(
             Object.keys(outs).length > 0
-              ? `Stacks de índices generados (${result.scene_count ?? "?"} escenas). ${parts.join(" | ")}${errTxt}`
+              ? `Stacks de índices generados${idxNote} (${result.scene_count ?? "?"} escenas). ${parts.join(" | ")}${errTxt}`
               : `${result.message || "Sin archivos de salida; comprueba recortes L2A."}${errTxt}`
           );
           if (Object.keys(outs).length > 0) {
             setStackMode("visual-index");
-            setVisualIndexGalleryKick((k) => k + 1);
+            if (pv === "ps") {
+              setSidebarTab("ps");
+              setVisualIndexGalleryKickPs((k) => k + 1);
+            } else {
+              setSidebarTab("prepro");
+              setVisualIndexGalleryKick((k) => k + 1);
+            }
             await selectProject(projectId, token);
           }
         } else if (r.data.ready && r.data.state === "FAILURE") {
@@ -309,6 +349,45 @@ export default function App() {
       clearInterval(iv);
     };
   }, [indexStacksTaskId, projectId, token]);
+
+  useEffect(() => {
+    if (!psExtractTaskId || !token || !projectId) {
+      return undefined;
+    }
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        setAuthToken(token);
+        const r = await api.get(`/preprocess/task-status/${psExtractTaskId}`);
+        if (cancelled) return;
+        if (r.data.ready && r.data.state === "SUCCESS") {
+          const result = r.data.result || {};
+          const errs = (result.errors || []).filter(Boolean);
+          const errTxt = errs.length ? ` Avisos: ${errs.join(" | ")}` : "";
+          setPsExtractTaskId("");
+          const n = result.processed ?? 0;
+          const ok = result.ok !== false && n > 0;
+          setMessage(
+            ok
+              ? `Extracción Planet PS terminada: ${n} composite(s) en recortesPS/.${errTxt}`
+              : `${result.message || "Sin composites extraídos; revisa zips en rasterPS/."}${errTxt}`
+          );
+          if (ok) await selectProject(projectId, token);
+        } else if (r.data.ready && r.data.state === "FAILURE") {
+          setPsExtractTaskId("");
+          setMessage(`Extracción PS falló: ${r.data.error || "error"}`);
+        }
+      } catch (_) {
+        /* ignorar */
+      }
+    };
+    poll();
+    const iv = setInterval(poll, 2500);
+    return () => {
+      cancelled = true;
+      clearInterval(iv);
+    };
+  }, [psExtractTaskId, projectId, token]);
 
   useEffect(() => {
     if (!s1SarStacksTaskId || !token || !projectId) {
@@ -849,7 +928,7 @@ export default function App() {
     }
   }
 
-  async function runS2L2aRecortes(layerId, productNames, sourceSubpath) {
+  async function runS2L2aRecortes(layerId, productNames, sourceSubpath, pipelineVariant = "s2") {
     if (!token || !projectId) {
       setMessage("Error: inicia sesion y selecciona un proyecto.");
       return false;
@@ -868,6 +947,7 @@ export default function App() {
       const body = {
         project_id: Number(projectId),
         product_names: names,
+        pipeline_variant: pipelineVariant === "ps" ? "ps" : "s2",
       };
       if (sourceSubpath !== undefined) {
         body.source_subpath = sourceSubpath;
@@ -883,7 +963,7 @@ export default function App() {
         body.layer_id = n;
       }
       const res = await api.post("/preprocess/s2-l2a-recortes", body);
-      setRecorteKind("s2");
+      setRecorteKind(pipelineVariant === "ps" ? "ps" : "s2");
       setRecorteTaskId(res.data.task_id);
       setMessage(
         `Recorte L2A en cola (tarea ${res.data.task_id}). Seguimiento: estado Celery cada pocos segundos hasta terminar.`
@@ -942,7 +1022,29 @@ export default function App() {
     }
   }
 
+  async function runPsPlanetExtract() {
+    if (!token || !projectId) {
+      setMessage("Error: inicia sesión y selecciona un proyecto.");
+      return;
+    }
+    setLoading(true);
+    setMessage("");
+    try {
+      setAuthToken(token);
+      const res = await api.post("/preprocess/ps-planetscope-zip-extract", {
+        project_id: Number(projectId),
+      });
+      setPsExtractTaskId(res.data.task_id);
+      setMessage(`Extracción Planet PS en cola (tarea ${res.data.task_id}).`);
+    } catch (error) {
+      setMessage(`Error: ${formatApiErrorDetail(error)}`);
+    } finally {
+      setLoading(false);
+    }
+  }
+
   async function runS2IndexStacks(explicitRasterIds, opts = {}) {
+    const pipelineVariant = opts.pipelineVariant === "ps" ? "ps" : "s2";
     const recorteFilenames = Array.isArray(opts?.recorteFilenames)
       ? [...new Set(opts.recorteFilenames.map((s) => String(s).trim()).filter(Boolean))]
       : [];
@@ -973,12 +1075,14 @@ export default function App() {
       const body = {
         project_id: Number(projectId),
         indices: indicesPayload,
+        pipeline_variant: pipelineVariant,
       };
       if (recorteFilenames.length > 0) {
         body.recorte_filenames = recorteFilenames;
       } else {
         body.raster_layer_ids = ids;
       }
+      indexStacksVariantRef.current = pipelineVariant;
       const res = await api.post("/preprocess/s2-index-stacks", body);
       setIndexStacksTaskId(res.data.task_id);
       setMessage(`Stacks de índices en cola (tarea ${res.data.task_id}).`);
@@ -1026,24 +1130,28 @@ export default function App() {
     }
   }
 
-  async function runClusterElbow() {
+  async function runClusterElbow(pipelineVariant = "s2") {
     if (!token || !projectId) {
       setMessage("Error: define proyecto.");
       return;
     }
+    const pv = pipelineVariant === "ps" ? "ps" : "s2";
     setClusterElbowLoading(true);
-    setClusterGmmResults(null);
+    if (pv === "ps") setClusterGmmResultsPs(null);
+    else setClusterGmmResults(null);
     setMessage("");
     try {
       setAuthToken(token);
       const res = await api.post("/cluster-analysis/elbow", {
         project_id: Number(projectId),
+        pipeline_variant: pv,
         k_min: 1,
         k_max: 10,
         max_samples: 100_000,
         random_state: 42,
       });
-      setClusterElbowResults(res.data);
+      if (pv === "ps") setClusterElbowResultsPs(res.data);
+      else setClusterElbowResults(res.data);
       const n = res.data.datasets?.length ?? 0;
       setMessage(
         n > 0
@@ -1057,22 +1165,25 @@ export default function App() {
     }
   }
 
-  async function runClusterGmm(kByKey) {
+  async function runClusterGmm(kByKey, pipelineVariant = "s2") {
     if (!token || !projectId) {
       setMessage("Error: define proyecto.");
       return;
     }
+    const pv = pipelineVariant === "ps" ? "ps" : "s2";
     setClusterGmmLoading(true);
     setMessage("");
     try {
       setAuthToken(token);
       const res = await api.post("/cluster-analysis/gmm", {
         project_id: Number(projectId),
+        pipeline_variant: pv,
         k_by_key: kByKey,
         max_samples: 100_000,
         random_state: 42,
       });
-      setClusterGmmResults(res.data);
+      if (pv === "ps") setClusterGmmResultsPs(res.data);
+      else setClusterGmmResults(res.data);
       setMessage(`GMM terminado. Salidas en ${res.data.output_dir}`);
     } catch (error) {
       setMessage(`Error: ${formatApiErrorDetail(error)}`);
@@ -1081,16 +1192,21 @@ export default function App() {
     }
   }
 
-  /** Resultados GMM ya guardados en ``cluster_gmm/`` (p. ej. otra sesión o tras reiniciar). */
-  async function loadPersistedClusterGmm() {
+  /** Resultados GMM ya guardados en ``cluster_gmm/`` o ``ClusterPS/`` (p. ej. otra sesión o tras reiniciar). */
+  async function loadPersistedClusterGmm(pipelineVariant = "s2") {
     if (!token || !projectId) return null;
+    const pv = pipelineVariant === "ps" ? "ps" : "s2";
     setAuthToken(token);
-    const res = await api.get(`/cluster-analysis/gmm-results/${projectId}`);
+    const res = await api.get(
+      `/cluster-analysis/gmm-results/${projectId}?pipeline_variant=${encodeURIComponent(pv)}`
+    );
     const data = res.data;
     if (data?.results?.length) {
-      setClusterGmmResults(data);
+      if (pv === "ps") setClusterGmmResultsPs(data);
+      else setClusterGmmResults(data);
     } else {
-      setClusterGmmResults(null);
+      if (pv === "ps") setClusterGmmResultsPs(null);
+      else setClusterGmmResults(null);
     }
     return data;
   }
@@ -1104,6 +1220,7 @@ export default function App() {
         setRecorteLayerId={setRecorteLayerId}
         preproGalleryKick={preproGalleryKick}
         preproClusterVizKick={preproClusterVizKick}
+        preproClusterVizKickPs={preproClusterVizKickPs}
         onOpenPreproGallery={() => {
           setSidebarTab("prepro");
           setPreproGalleryKick((k) => k + 1);
@@ -1151,20 +1268,29 @@ export default function App() {
         onRunAI={runAI}
         onDownload={preprocessDownload}
         recortePipelineBusy={!!recorteTaskId}
-        indexStacksBusy={!!indexStacksTaskId || !!s1SarStacksTaskId}
+        indexStacksBusy={!!indexStacksTaskId || !!s1SarStacksTaskId || !!psExtractTaskId}
         visualIndexGalleryKick={visualIndexGalleryKick}
-        onS2L2aRecortes={runS2L2aRecortes}
+        visualIndexGalleryKickPs={visualIndexGalleryKickPs}
+        onS2L2aRecortes={(layerId, names, sub) => runS2L2aRecortes(layerId, names, sub, "s2")}
+        onPsL2aRecortes={(layerId, names, sub) => runS2L2aRecortes(layerId, names, sub, "ps")}
         onS1GrdRecortes={runS1GrdRecortes}
         onS1SarIndexStacks={runS1SarIndexStacks}
         s1SarStacksBusy={!!s1SarStacksTaskId}
-        onS2IndexStacks={runS2IndexStacks}
+        onS2IndexStacks={(ids, opts) => runS2IndexStacks(ids, { ...opts, pipelineVariant: "s2" })}
+        onPsIndexStacks={(ids, opts) => runS2IndexStacks(ids, { ...opts, pipelineVariant: "ps" })}
         clusterElbowLoading={clusterElbowLoading}
         clusterGmmLoading={clusterGmmLoading}
         clusterElbowResults={clusterElbowResults}
         clusterGmmResults={clusterGmmResults}
-        onClusterElbow={runClusterElbow}
-        onClusterGmm={runClusterGmm}
-        onLoadPersistedClusterGmm={loadPersistedClusterGmm}
+        clusterElbowResultsPs={clusterElbowResultsPs}
+        clusterGmmResultsPs={clusterGmmResultsPs}
+        onClusterElbow={() => runClusterElbow("s2")}
+        onClusterGmm={(k) => runClusterGmm(k, "s2")}
+        onClusterElbowPs={() => runClusterElbow("ps")}
+        onClusterGmmPs={(k) => runClusterGmm(k, "ps")}
+        onLoadPersistedClusterGmm={() => loadPersistedClusterGmm("s2")}
+        onLoadPersistedClusterGmmPs={() => loadPersistedClusterGmm("ps")}
+        onPsPlanetExtract={runPsPlanetExtract}
         s2Download={s2Download}
         s1Download={s1Download}
       />

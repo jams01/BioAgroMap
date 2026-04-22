@@ -13,6 +13,7 @@ export default function Sidebar({
   setRecorteLayerId,
   preproGalleryKick,
   preproClusterVizKick,
+  preproClusterVizKickPs = 0,
   onOpenPreproGallery,
   onOpenPreproClusterViz,
   token,
@@ -57,19 +58,28 @@ export default function Sidebar({
   onDownload,
   recortePipelineBusy,
   onS2L2aRecortes,
+  onPsL2aRecortes,
   onS1GrdRecortes,
   onS1SarIndexStacks,
   s1SarStacksBusy = false,
   onS2IndexStacks,
+  onPsIndexStacks,
   clusterElbowLoading,
   clusterGmmLoading,
   clusterElbowResults,
   clusterGmmResults,
   onClusterElbow,
   onClusterGmm,
+  onClusterElbowPs,
+  onClusterGmmPs,
   onLoadPersistedClusterGmm,
+  onLoadPersistedClusterGmmPs,
+  onPsPlanetExtract,
   s2Download,
   s1Download,
+  visualIndexGalleryKickPs = 0,
+  clusterElbowResultsPs,
+  clusterGmmResultsPs,
 }) {
   const [panelOpen, setPanelOpen] = useState(true);
   const [layersPanelOpen, setLayersPanelOpen] = useState(false);
@@ -80,6 +90,13 @@ export default function Sidebar({
     setPanelOpen(true);
     setLayersPanelOpen(false);
   }, [visualIndexGalleryKick]);
+
+  useEffect(() => {
+    if (!visualIndexGalleryKickPs) return;
+    setActiveTab("ps");
+    setPanelOpen(true);
+    setLayersPanelOpen(false);
+  }, [visualIndexGalleryKickPs]);
 
   return (
     <aside className="panel">
@@ -135,6 +152,19 @@ export default function Sidebar({
           }}
         >
           S2
+        </button>
+        <button
+          role="tab"
+          aria-selected={panelOpen && activeTab === "ps"}
+          type="button"
+          className={(panelOpen && activeTab === "ps" ? "active " : "") + "top-tab-ps"}
+          onClick={() => {
+            setActiveTab("ps");
+            setPanelOpen(true);
+            setLayersPanelOpen(false);
+          }}
+        >
+          PS
         </button>
         <button
           role="tab"
@@ -259,6 +289,38 @@ export default function Sidebar({
           onClusterElbow={onClusterElbow}
           onClusterGmm={onClusterGmm}
           onLoadPersistedClusterGmm={onLoadPersistedClusterGmm}
+          pipelineVariant="s2"
+        />
+      ) : null}
+
+      {panelOpen && !layersPanelOpen && activeTab === "ps" ? (
+        <PreprocessPanel
+          token={token}
+          projectId={projectId}
+          loading={loading}
+          selectedIndices={selectedIndices}
+          setSelectedIndices={setSelectedIndices}
+          stackMode={stackMode}
+          setStackMode={setStackMode}
+          mapLayers={mapLayers}
+          recortePipelineBusy={recortePipelineBusy}
+          indexStacksBusy={indexStacksBusy}
+          visualIndexGalleryKick={visualIndexGalleryKickPs}
+          recorteLayerId={recorteLayerId}
+          setRecorteLayerId={setRecorteLayerId}
+          preproGalleryKick={preproGalleryKick}
+          preproClusterVizKick={preproClusterVizKickPs}
+          onS2L2aRecortes={onPsL2aRecortes}
+          onS2IndexStacks={onPsIndexStacks}
+          clusterElbowLoading={clusterElbowLoading}
+          clusterGmmLoading={clusterGmmLoading}
+          clusterElbowResults={clusterElbowResultsPs}
+          clusterGmmResults={clusterGmmResultsPs}
+          onClusterElbow={onClusterElbowPs}
+          onClusterGmm={onClusterGmmPs}
+          onLoadPersistedClusterGmm={onLoadPersistedClusterGmmPs}
+          pipelineVariant="ps"
+          onPsPlanetExtract={onPsPlanetExtract}
         />
       ) : null}
 

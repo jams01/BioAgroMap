@@ -43,6 +43,76 @@ export const INDEX_CATALOG = [
   },
 ];
 
+/** PlanetScope (8 bandas): b=PS2≈S2B02, g=PS4≈S2B03, r=PS6≈S2B04, ir=PS8≈S2B8a (tabla de índices). */
+export const INDEX_CATALOG_PS = [
+  {
+    id: "TODOS",
+    label: "TODOS",
+    description:
+      "Marca NDVI, NDWI (verde–NIR), MSAVI2, MTVI2, VARI, TGI, KNDVI, GIYI, MCARI, NDRE y R_structure (NDRE/NDVI) para generar todos los stacks en un solo proceso.",
+  },
+  {
+    id: "NDVI",
+    label: "NDVI",
+    description: "NDVI = (ir − r) / (ir + r); ir=NIR (PS8), r=Rojo (PS6).",
+  },
+  {
+    id: "NDWI",
+    label: "NDWI",
+    description: "NDWI (McFeeters) = (g − ir) / (g + ir); g=Verde (PS4), ir=NIR (PS8).",
+  },
+  {
+    id: "MSAVI2",
+    label: "MSAVI2",
+    description: "MSAVI2 con ir y r (NIR y rojo Planet / equivalentes S2 B8a y B4).",
+  },
+  {
+    id: "MTVI2",
+    label: "MTVI2",
+    description: "MTVI2 con ir, g y r (NIR, verde y rojo Planet).",
+  },
+  {
+    id: "VARI",
+    label: "VARI",
+    description: "VARI = (g − r) / (g + r − b); b=Azul (PS2).",
+  },
+  {
+    id: "TGI",
+    label: "TGI",
+    description: "TGI = (120·(r − b) − 190·(r − g)) / 2.",
+  },
+  {
+    id: "KNDVI",
+    label: "KNDVI",
+    description:
+      "Kernel NDVI (EO Browser): tanh(((ir − r) / (ir + r))²); ir=NIR (PS8), r=Rojo (PS6).",
+  },
+  {
+    id: "GIYI",
+    label: "GIYI",
+    description:
+      "Green–Yellow (custom): (GreenI − Yellow) / (GreenI + Yellow); Green I = PS3, Yellow = PS5.",
+  },
+  {
+    id: "MCARI",
+    label: "MCARI",
+    description:
+      "Modified Chlorophyll Absorption Ratio Index: [(RedEdge − Red) − 0.2·(RedEdge − Green)]·(RedEdge/Red); RedEdge=PS7, Red=PS6, Green=PS4.",
+  },
+  {
+    id: "NDRE",
+    label: "NDRE",
+    description:
+      "Normalized Difference Red Edge: (NIR − RedEdge) / (NIR + RedEdge); NIR=PS8, RedEdge=PS7.",
+  },
+  {
+    id: "RSTRUCTURE",
+    label: "R_structure",
+    description:
+      "Cociente NDRE/NDVI (custom, estructura de dosel): NDRE y NDVI con NIR=PS8, rojo=PS6, borde rojo=PS7.",
+  },
+];
+
 function formatFileSize(bytes) {
   if (bytes == null || !Number.isFinite(Number(bytes))) return "";
   const n = Number(bytes);
@@ -119,7 +189,12 @@ export default function PreprocessPanel({
   setRecorteLayerId,
   preproGalleryKick = 0,
   preproClusterVizKick = 0,
+  pipelineVariant = "s2",
+  onPsPlanetExtract,
 }) {
+  const recDirLabel = pipelineVariant === "ps" ? "recortesPS" : "recortes";
+  const idxDirLabel = pipelineVariant === "ps" ? "indecesPS" : "indices";
+  const clusterDirLabel = pipelineVariant === "ps" ? "ClusterPS" : "cluster_gmm";
   const [clusterModalOpen, setClusterModalOpen] = useState(false);
   const [clusterResultsModalOpen, setClusterResultsModalOpen] = useState(false);
   const [clusterApiBuild, setClusterApiBuild] = useState("");
@@ -339,7 +414,7 @@ export default function PreprocessPanel({
         return;
       }
       setClusterPeekHint(
-        "No se encontraron GeoTIFF de GMM en cluster_gmm/ de este proyecto (o los nombres no coinciden con el formato esperado)."
+        `No se encontraron GeoTIFF de GMM en ${clusterDirLabel}/ de este proyecto (o los nombres no coinciden con el formato esperado).`
       );
       window.setTimeout(() => setClusterPeekHint(""), 9000);
     } catch (e) {
@@ -360,33 +435,68 @@ export default function PreprocessPanel({
 
   return (
     <>
-      <label>
-        1. Polígonos para recorte
-        <select
-          value={recorteLayerId}
-          onChange={(e) => setRecorteLayerId(e.target.value)}
-          disabled={busy}
-        >
-          <option value="">Todos los lotes del proyecto (unión)</option>
-          {vectorLayers
-            .filter((l) => l.serverId != null && Number.isFinite(Number(l.serverId)))
-            .map((l) => (
-              <option key={l.id} value={String(l.serverId)}>
-                {l.name}
-              </option>
-            ))}
-        </select>
-      </label>
+      {pipelineVariant === "ps" ? (
+        <>
+          <div className="indices-section-title">
+            <strong>1. Extraer archivo</strong>
+          </div>
+          <label>
+            Polígono del proyecto (pasos posteriores: índices, cluster)
+            <select
+              value={recorteLayerId}
+              onChange={(e) => setRecorteLayerId(e.target.value)}
+              disabled={busy}
+            >
+              <option value="">Todos los lotes del proyecto (unión)</option>
+              {vectorLayers
+                .filter((l) => l.serverId != null && Number.isFinite(Number(l.serverId)))
+                .map((l) => (
+                  <option key={l.id} value={String(l.serverId)}>
+                    {l.name}
+                  </option>
+                ))}
+            </select>
+          </label>
+          <button
+            type="button"
+            className="indices-run-btn"
+            onClick={() => void onPsPlanetExtract?.()}
+            disabled={busy || !projectId || !token}
+          >
+            Extraer archivo
+          </button>
+        </>
+      ) : (
+        <>
+          <label>
+            1. Polígonos para recorte
+            <select
+              value={recorteLayerId}
+              onChange={(e) => setRecorteLayerId(e.target.value)}
+              disabled={busy}
+            >
+              <option value="">Todos los lotes del proyecto (unión)</option>
+              {vectorLayers
+                .filter((l) => l.serverId != null && Number.isFinite(Number(l.serverId)))
+                .map((l) => (
+                  <option key={l.id} value={String(l.serverId)}>
+                    {l.name}
+                  </option>
+                ))}
+            </select>
+          </label>
 
-      <button
-        type="button"
-        onClick={() => void openL2aDownloadsModal()}
-        disabled={busy || !projectId || !token}
-      >
-        Listar archivos L2A en descargas
-      </button>
+          <button
+            type="button"
+            onClick={() => void openL2aDownloadsModal()}
+            disabled={busy || !projectId || !token}
+          >
+            Listar archivos L2A en descargas
+          </button>
+        </>
+      )}
 
-      {l2aModalOpen ? (
+      {pipelineVariant !== "ps" && l2aModalOpen ? (
         <div
           className="index-modal-overlay"
           role="dialog"
@@ -692,7 +802,7 @@ export default function PreprocessPanel({
       ) : null}
       {loadingClusterPersisted ? (
         <p className="prepro-hint" role="status">
-          Cargando resultados GMM desde cluster_gmm/…
+          Cargando resultados GMM desde {clusterDirLabel}/…
         </p>
       ) : null}
       <button
@@ -718,9 +828,9 @@ export default function PreprocessPanel({
 
       <div className="indices-section">
         <div className="indices-section-title">
-          <strong>3) Índices (Sentinel-2)</strong>
+          <strong>{pipelineVariant === "ps" ? "3) Índices (PS)" : "3) Índices (Sentinel-2)"}</strong>
           <span className="indices-section-hint">
-            Desde recortes L2A (6 bandas): stacks en <code>indices/&lt;INDICE&gt;/</code>, una banda por
+            Desde {recDirLabel} L2A (6 bandas): stacks en <code>{`${idxDirLabel}/<INDICE>/`}</code>, una banda por
             fecha.
           </span>
         </div>
@@ -760,8 +870,9 @@ export default function PreprocessPanel({
         <div className="indices-section-title">
           <strong>5) Series tiempo</strong>
           <span className="indices-section-hint">
-            Mismas escenas L2A (6 bandas) que en el paso 3: medias espaciales de los cinco índices por fecha,
-            con media temporal y ±1σ (espacial y temporal).
+            {pipelineVariant === "ps"
+              ? "Mismas escenas PlanetScope (8 bandas) en recortesPS: medias espaciales por índice y fecha, curvas por píxel, media temporal y tendencia (mismo diseño que S2)."
+              : "Mismas escenas L2A (6 bandas) que en el paso 3: medias espaciales de los cinco índices por fecha, con media temporal y ±1σ (espacial y temporal)."}
           </span>
         </div>
         <button
@@ -806,10 +917,10 @@ export default function PreprocessPanel({
             <div className="index-modal-body cluster-flow-body">
               <p className="cluster-flow-intro">
                 Se analiza cada stack de índices (NDVI, EVI, …) y{" "}
-                <strong>todos</strong> los GeoTIFF con ≥6 bandas en <code>recortes/</code>. Primero
+                <strong>todos</strong> los GeoTIFF con ≥6 bandas en <code>{recDirLabel}/</code>. Primero
                 el método del codo (KMeans) en una sola fila; luego indica una única K y ejecuta GMM
-                (la misma para todos los datasets). Los mapas de salida se abren en otra ventana al
-                terminar.
+                (la misma para todos los datasets). Salida en <code>{clusterDirLabel}/</code>. Los mapas
+                se abren en otra ventana al terminar.
               </p>
               <div className="cluster-flow-toolbar">
                 <button
@@ -1052,7 +1163,7 @@ export default function PreprocessPanel({
                       ? "s1-index"
                       : "rgb"
         }
-        indexCatalog={INDEX_CATALOG}
+        indexCatalog={pipelineVariant === "ps" ? INDEX_CATALOG_PS : INDEX_CATALOG}
         selectedIndices={selectedIndices}
         onSelectedIndicesChange={setSelectedIndices}
         onClose={() => setGalleryOpen(false)}
@@ -1069,17 +1180,33 @@ export default function PreprocessPanel({
           }
           setGalleryOpen(false);
         }}
-        onTimeSeries={async (ids) => {
+        onTimeSeries={async (arg) => {
           if (!token || !projectId) return;
-          if (ids && typeof ids === "object" && !Array.isArray(ids)) return;
-          if (!Array.isArray(ids) || !ids.length) return;
+          let raster_layer_ids = [];
+          let recorte_relative_paths = [];
+          let pv = pipelineVariant === "ps" ? "ps" : "s2";
+          if (Array.isArray(arg)) {
+            raster_layer_ids = arg;
+          } else if (arg && typeof arg === "object") {
+            if (Array.isArray(arg.s1SarDates)) return;
+            raster_layer_ids = arg.rasterLayerIds ?? arg.raster_layer_ids ?? [];
+            recorte_relative_paths = arg.recorteRelativePaths ?? arg.recorte_relative_paths ?? [];
+            if (arg.pipelineVariant === "ps" || arg.pipelineVariant === "s2") {
+              pv = arg.pipelineVariant;
+            }
+          } else return;
+          if (!raster_layer_ids.length && !recorte_relative_paths.length) return;
           setVtsLoading(true);
           setVtsError("");
           try {
             setAuthToken(token);
             const res = await api.post("/preprocess/vegetation-time-series", {
               project_id: Number(projectId),
-              raster_layer_ids: ids,
+              raster_layer_ids,
+              recorte_relative_paths,
+              pipeline_variant: pv,
+              max_pixel_series: 4000,
+              random_seed: 42,
             });
             setVtsData(res.data);
             setGalleryOpen(false);
@@ -1092,6 +1219,7 @@ export default function PreprocessPanel({
         }}
         projectId={projectId}
         token={token}
+        pipelineVariant={pipelineVariant}
       />
 
       {vtsModalOpen && vtsData ? (
@@ -1107,7 +1235,11 @@ export default function PreprocessPanel({
         >
           <div className="index-modal vts-modal" onClick={(e) => e.stopPropagation()}>
             <div className="index-modal-header">
-              <h3 id="vts-modal-title">Series de tiempo — índices de vegetación</h3>
+              <h3 id="vts-modal-title">
+                {vtsData?.pipeline_variant === "ps"
+                  ? "Series de tiempo — índices PlanetScope"
+                  : "Series de tiempo — índices de vegetación"}
+              </h3>
               <button
                 type="button"
                 className="index-modal-close"

@@ -26,6 +26,7 @@ from app.services.raster_geo import (
     render_raster_preview_png,
     render_s1_vh_vv_ratio_preview_png,
 )
+from app.services.preprocess_pipeline_variant import is_planetscope_ps_recorte_filename
 from app.services.s2_composites import (
     s2_acquisition_date_label,
     s2_date_slug_for_filename,
@@ -729,7 +730,14 @@ def get_raster_preview(
     if not path.exists():
         raise HTTPException(status_code=404, detail="Raster file not found")
     try:
-        meta = raster.raster_metadata or {}
+        meta = dict(raster.raster_metadata or {})
+        # Nombre visible de capa suele conservar ``PS_dd-mm-yy.tif`` aunque el archivo en disco sea uuid.tif.
+        if not (meta.get("source_name") or "").strip() and (raster.name or "").strip():
+            meta["source_name"] = raster.name
+        lab0 = (meta.get("source_name") or raster.name or "").strip()
+        if lab0 and is_planetscope_ps_recorte_filename(lab0):
+            meta["planetscope_composite"] = True
+            meta["preview_rgb_bands"] = [6, 4, 2]
         sd = (s1_derived or "").strip().lower()
         if sd == "vh_vv_ratio":
             png = render_s1_vh_vv_ratio_preview_png(path, layer_metadata=meta)
