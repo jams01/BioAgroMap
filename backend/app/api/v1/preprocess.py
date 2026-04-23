@@ -1,9 +1,13 @@
 import json
+import logging
 import re
 import tempfile
 import uuid
 from datetime import datetime
 from pathlib import Path
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
+from urllib.request import urlopen
 
 import numpy as np
 import rasterio
@@ -25,6 +29,12 @@ from app.services.preprocess_pipeline_variant import (
     normalize_pipeline_variant,
     recortes_dir_name,
 )
+from app.services.ps_spatiotemporal_cluster import (
+    cluster_map_to_png,
+    get_preset,
+    load_meta,
+    run_ps_spatiotemporal_cluster,
+)
 from app.services.raster_geo import render_raster_preview_png
 from app.core.config import settings
 from app.db.session import get_db
@@ -38,6 +48,7 @@ from app.schemas.schemas import (
     S1SarIndexStacksRequest,
     S1SarTimeSeriesRequest,
     PsPlanetZipExtractRequest,
+    PsSpatiotemporalClusterRequest,
     S2IndexStacksRequest,
     S2L2aRecorteRequest,
     StackRequest,
@@ -45,10 +56,177 @@ from app.schemas.schemas import (
 )
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 def _pipeline_variant_query(pipeline_variant: str = Query("s2", description='s2 → recortes/indices; ps → recortesPS/indecesPS')) -> str:
     return normalize_pipeline_variant(pipeline_variant)
+
+
+def _norm_iso_date(raw: str) -> str:
+    s = str(raw or "").strip()
+    return s[:10] if len(s) >= 10 else s
+
+
+def _collect_dates_from_index_stacks(tenant_id: int, project_id: int, pipeline_variant: str) -> list[str]:
+    """Fechas únicas YYYY-MM-DD desde BAND_DATES_JSON en stacks bajo indices/ o indecesPS/."""
+    root = _tenant_storage(tenant_id, project_id, indices_dir_name(pipeline_variant))
+    if not root.is_dir():
+        return []
+    dates: set[str] = set()
+    for p in root.rglob("*.tif"):
+        if "_cog" in p.name.lower() or not p.is_file():
+            continue
+        rel = _safe_relative_under(root, p)
+        if rel is None:
+            continue
+        parts = Path(rel).parts
+        if len(parts) < 2:
+            continue
+        if _canonical_index_dir_name(parts[0]) is None:
+            continue
+        try:
+            with rasterio.open(p) as src:
+                tags = src.tags()
+        except Exception:
+            continue
+        jd = tags.get("BAND_DATES_JSON")
+        if not isinstance(jd, str) or not jd.strip():
+            continue
+        try:
+            arr = json.loads(jd)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(arr, list):
+            continue
+        for d in arr:
+            nd = _norm_iso_date(str(d))
+            if re.match(r"^\d{4}-\d{2}-\d{2}$", nd):
+                dates.add(nd)
+    return sorted(dates)
+
+
+def _collect_dates_from_s1_sar_stacks(tenant_id: int, project_id: int) -> list[str]:
+    """Fechas únicas YYYY-MM-DD desde BAND_DATES_JSON en stacks SAR bajo s1indices/."""
+    from app.services.s1_sar_indices import S1_SAR_STACKS_ROOT_NAME
+
+    root = _tenant_storage(tenant_id, project_id, S1_SAR_STACKS_ROOT_NAME)
+    if not root.is_dir():
+        return []
+    dates: set[str] = set()
+    for p in root.rglob("*.tif"):
+        if "_cog" in p.name.lower() or not p.is_file():
+            continue
+        rel = _safe_relative_under(root, p)
+        if rel is None:
+            continue
+        parts = Path(rel).parts
+        if len(parts) < 2:
+            continue
+        if _canonical_s1_sar_index_dir_name(parts[0]) is None:
+            continue
+        try:
+            with rasterio.open(p) as src:
+                tags = src.tags()
+        except Exception:
+            continue
+        jd = tags.get("BAND_DATES_JSON")
+        if not isinstance(jd, str) or not jd.strip():
+            continue
+        try:
+            arr = json.loads(jd)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(arr, list):
+            continue
+        for d in arr:
+            nd = _norm_iso_date(str(d))
+            if re.match(r"^\d{4}-\d{2}-\d{2}$", nd):
+                dates.add(nd)
+    return sorted(dates)
+
+
+def _open_meteo_daily(lat: float, lon: float, start_date: str, end_date: str) -> list[dict]:
+    """Serie diaria (Open-Meteo archive) en unidades nativas."""
+    params = {
+        "latitude": f"{lat:.8f}",
+        "longitude": f"{lon:.8f}",
+        "start_date": start_date,
+        "end_date": end_date,
+        "timezone": "auto",
+        "daily": "temperature_2m_mean,relative_humidity_2m_mean,precipitation_sum,shortwave_radiation_sum",
+    }
+    url = f"https://archive-api.open-meteo.com/v1/archive?{urlencode(params)}"
+    try:
+        with urlopen(url, timeout=25) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=502, detail=f"No se pudo consultar Open-Meteo: {exc!s}") from exc
+
+    daily = payload.get("daily") or {}
+    times = daily.get("time") or []
+    t2m = daily.get("temperature_2m_mean") or []
+    rh = daily.get("relative_humidity_2m_mean") or []
+    pr = daily.get("precipitation_sum") or []
+    sw = daily.get("shortwave_radiation_sum") or []
+    n = min(len(times), len(t2m), len(rh), len(pr), len(sw))
+    out: list[dict] = []
+    for i in range(n):
+        d = _norm_iso_date(times[i])
+        if not re.match(r"^\d{4}-\d{2}-\d{2}$", d):
+            continue
+        out.append(
+            {
+                "date": d,
+                "temp": float(t2m[i]) if t2m[i] is not None else None,
+                "humidity": float(rh[i]) if rh[i] is not None else None,
+                "precip": float(pr[i]) if pr[i] is not None else None,
+                "radiation": float(sw[i]) if sw[i] is not None else None,
+            }
+        )
+    return out
+
+
+def _monthly_means_from_daily(rows: list[dict]) -> dict[str, dict]:
+    buckets: dict[str, dict[str, list[float]]] = {}
+    for r in rows:
+        m = str(r.get("date") or "")[:7]
+        if not re.match(r"^\d{4}-\d{2}$", m):
+            continue
+        b = buckets.setdefault(m, {"precip": [], "temp": [], "humidity": [], "radiation": []})
+        for k in ("precip", "temp", "humidity", "radiation"):
+            v = r.get(k)
+            if v is None or not np.isfinite(v):
+                continue
+            b[k].append(float(v))
+    out: dict[str, dict] = {}
+    for m, b in buckets.items():
+        out[m] = {
+            "precip": float(np.mean(b["precip"])) if b["precip"] else None,
+            "temp": float(np.mean(b["temp"])) if b["temp"] else None,
+            "humidity": float(np.mean(b["humidity"])) if b["humidity"] else None,
+            "radiation": float(np.mean(b["radiation"])) if b["radiation"] else None,
+        }
+    return out
+
+
+def _series_from_scene_dates(scene_dates: list[str], monthly_means: dict[str, dict]) -> list[dict]:
+    out: list[dict] = []
+    for d in scene_dates:
+        nd = _norm_iso_date(d)
+        month = nd[:7]
+        row = monthly_means.get(month) or {}
+        out.append(
+            {
+                "date": nd,
+                "month": month,
+                "precip": row.get("precip"),
+                "temp": row.get("temp"),
+                "humidity": row.get("humidity"),
+                "radiation": row.get("radiation"),
+            }
+        )
+    return out
 
 
 @router.post("/preprocess/download")
@@ -1537,6 +1715,78 @@ def preprocess_s1_sar_time_series(
     }
 
 
+@router.get("/preprocess/agroclimate-series")
+def preprocess_agroclimate_series(
+    project_id: int = Query(..., ge=1),
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(tenant_from_jwt),
+):
+    """
+    Serie agroclimática por sensor para el dashboard multisensor.
+    - Centroide: geometría unión del proyecto (WGS84).
+    - Rango: min/max de fechas disponibles entre stacks S1/S2/PS.
+    - Valor por escena: promedio mensual del mes al que pertenece cada fecha del timelapse.
+    """
+    from shapely import wkt as shapely_wkt
+
+    from app.services.project_geometry import wkt_union_from_project_layers
+
+    project = db.query(Project).filter(Project.id == project_id, Project.tenant_id == tenant_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    wkt = wkt_union_from_project_layers(db, project_id, tenant_id, None)
+    if not wkt:
+        return {
+            "project_id": project_id,
+            "source": "open-meteo",
+            "centroid": None,
+            "date_range": None,
+            "by_sensor": {"s1": [], "s2": [], "ps": []},
+            "monthly_source_dates": [],
+        }
+
+    try:
+        geom = shapely_wkt.loads(wkt)
+        c = geom.centroid
+        lon = float(c.x)
+        lat = float(c.y)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"No se pudo calcular centroide del AOI: {exc!s}") from exc
+
+    s1_dates = _collect_dates_from_s1_sar_stacks(tenant_id, project_id)
+    s2_dates = _collect_dates_from_index_stacks(tenant_id, project_id, "s2")
+    ps_dates = _collect_dates_from_index_stacks(tenant_id, project_id, "ps")
+    all_dates = sorted({*s1_dates, *s2_dates, *ps_dates})
+    if not all_dates:
+        return {
+            "project_id": project_id,
+            "source": "open-meteo",
+            "centroid": {"lat": lat, "lon": lon},
+            "date_range": None,
+            "by_sensor": {"s1": [], "s2": [], "ps": []},
+            "monthly_source_dates": [],
+        }
+
+    start_date = all_dates[0]
+    end_date = all_dates[-1]
+    daily_rows = _open_meteo_daily(lat, lon, start_date, end_date)
+    monthly_means = _monthly_means_from_daily(daily_rows)
+
+    return {
+        "project_id": project_id,
+        "source": "open-meteo",
+        "centroid": {"lat": lat, "lon": lon},
+        "date_range": {"start": start_date, "end": end_date},
+        "by_sensor": {
+            "s1": _series_from_scene_dates(s1_dates, monthly_means),
+            "s2": _series_from_scene_dates(s2_dates, monthly_means),
+            "ps": _series_from_scene_dates(ps_dates, monthly_means),
+        },
+        "monthly_source_dates": sorted(monthly_means.keys()),
+    }
+
+
 @router.post("/preprocess/indices")
 def preprocess_indices(
     payload: IndicesRequest,
@@ -1785,3 +2035,104 @@ def preprocess_task_status(task_id: str):
     if ar.state == "FAILURE":
         return {"state": ar.state, "ready": True, "error": str(ar.result) if ar.result else "failure"}
     return {"state": ar.state, "ready": ar.ready(), "info": ar.info}
+
+
+@router.post("/preprocess/ps-spatiotemporal-cluster/{project_id}")
+def ps_spatiotemporal_cluster_run(
+    project_id: int,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(tenant_from_jwt),
+    preset: str = Query(
+        "smart1",
+        description=(
+            "smart1 → ps_st_cluster/; smart2 → ps_st_cluster_smart2/; smart3 → ps_st_cluster_smart3/ "
+            "(ver documentación del preset)."
+        ),
+    ),
+    body: PsSpatiotemporalClusterRequest | None = None,
+):
+    """
+    Pipeline resumido: cuatro stacks en ``indecesPS/`` → 7 features por píxel → KMeans.
+    ``preset=smart1``: NDVI (mean/std/min), NDRE_mean, NDWI_mean/std, VARI_mean.
+    ``preset=smart2``: EVI (mean/std/min), NDRE_mean, NDWI_mean/std, VARI_mean.
+    ``preset=smart3``: KNDVI (mean/std/min), MCARI_mean, NDWI_mean/std, VARI_mean.
+    """
+    project = db.query(Project).filter(Project.id == project_id, Project.tenant_id == tenant_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    try:
+        pr = get_preset(preset)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    opts = body or PsSpatiotemporalClusterRequest()
+    index_root = _tenant_storage(tenant_id, project_id, indices_dir_name("ps"))
+    out_dir = _tenant_storage(tenant_id, project_id, pr.output_subdir)
+    try:
+        meta = run_ps_spatiotemporal_cluster(
+            index_root,
+            out_dir,
+            preset_id=pr.id,
+            n_clusters=opts.n_clusters,
+            random_state=opts.random_state,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("ps_spatiotemporal_cluster failed")
+        raise HTTPException(status_code=500, detail=f"Error en pipeline: {exc!s}") from exc
+    return {"status": "ok", "meta": meta}
+
+
+@router.get("/preprocess/ps-spatiotemporal-cluster-status/{project_id}")
+def ps_spatiotemporal_cluster_status(
+    project_id: int,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(tenant_from_jwt),
+    preset: str = Query("smart1", description="smart1, smart2 o smart3"),
+):
+    project = db.query(Project).filter(Project.id == project_id, Project.tenant_id == tenant_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    try:
+        pr = get_preset(preset)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    out_dir = _tenant_storage(tenant_id, project_id, pr.output_subdir)
+    map_path = out_dir / "final_cluster_map.tif"
+    return {
+        "ready": map_path.is_file(),
+        "preset": pr.id,
+        "meta": load_meta(out_dir),
+    }
+
+
+@router.get("/preprocess/ps-spatiotemporal-cluster-preview/{project_id}")
+def ps_spatiotemporal_cluster_preview(
+    project_id: int,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(tenant_from_jwt),
+    preset: str = Query("smart1", description="smart1, smart2 o smart3"),
+):
+    """PNG del mapa de clusters (colores discretos)."""
+    project = db.query(Project).filter(Project.id == project_id, Project.tenant_id == tenant_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    try:
+        pr = get_preset(preset)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    map_path = _tenant_storage(tenant_id, project_id, pr.output_subdir) / "final_cluster_map.tif"
+    if not map_path.is_file():
+        raise HTTPException(status_code=404, detail="Aún no hay mapa de cluster. Ejecuta POST ps-spatiotemporal-cluster.")
+    try:
+        png = cluster_map_to_png(map_path.resolve())
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"No se pudo generar la vista previa: {exc!s}") from exc
+    return Response(
+        content=png,
+        media_type="image/png",
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+        },
+    )

@@ -49,12 +49,17 @@ export const INDEX_CATALOG_PS = [
     id: "TODOS",
     label: "TODOS",
     description:
-      "Marca NDVI, NDWI (verde–NIR), MSAVI2, MTVI2, VARI, TGI, KNDVI, GIYI, MCARI, NDRE y R_structure (NDRE/NDVI) para generar todos los stacks en un solo proceso.",
+      "Marca NDVI, EVI, NDWI (verde–NIR), MSAVI2, MTVI2, VARI, TGI, KNDVI, GIYI, MCARI, NDRE y R_structure (NDRE/NDVI) para generar todos los stacks en un solo proceso.",
   },
   {
     id: "NDVI",
     label: "NDVI",
     description: "NDVI = (ir − r) / (ir + r); ir=NIR (PS8), r=Rojo (PS6).",
+  },
+  {
+    id: "EVI",
+    label: "EVI",
+    description: "EVI = 2,5·(ir − r) / (ir + 6r − 7,5b + L); ir=NIR, r=rojo, b=azul Planet; L según escala DN.",
   },
   {
     id: "NDWI",
@@ -916,11 +921,22 @@ export default function PreprocessPanel({
             </div>
             <div className="index-modal-body cluster-flow-body">
               <p className="cluster-flow-intro">
-                Se analiza cada stack de índices (NDVI, EVI, …) y{" "}
-                <strong>todos</strong> los GeoTIFF con ≥6 bandas en <code>{recDirLabel}/</code>. Primero
-                el método del codo (KMeans) en una sola fila; luego indica una única K y ejecuta GMM
-                (la misma para todos los datasets). Salida en <code>{clusterDirLabel}/</code>. Los mapas
-                se abren en otra ventana al terminar.
+                {pipelineVariant === "ps"
+                  ? (
+                    <>
+                      Se analiza cada stack de índices en <code>indecesPS/</code> (NDVI, NDWI, MSAVI2, …).
+                      Primero el método del codo (KMeans) en una sola fila; luego indica una única K y ejecuta GMM
+                      (la misma para todos los índices). Salida en <code>{clusterDirLabel}/</code>.
+                    </>
+                  )
+                  : (
+                    <>
+                      Se analiza cada stack de índices (NDVI, EVI, …) y <strong>todos</strong> los GeoTIFF con ≥6
+                      bandas en <code>{recDirLabel}/</code>. Primero el método del codo (KMeans) en una sola fila;
+                      luego indica una única K y ejecuta GMM (la misma para todos los datasets). Salida en{" "}
+                      <code>{clusterDirLabel}/</code>. Los mapas se abren en otra ventana al terminar.
+                    </>
+                  )}
               </p>
               <div className="cluster-flow-toolbar">
                 <button

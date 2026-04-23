@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import base64
 import io
+import json
 import logging
 import re
 import shutil
@@ -39,6 +40,9 @@ INDEX_KEYS = (
     "KNDVI",
     "GIYI",
 )
+
+# Índices SAR (stacks en ``s1indices/<KEY>/``).
+S1_INDEX_KEYS = ("RVI", "RFDI", "VV_VH", "VH_VV", "NRPB")
 
 # Predicción en una sola lectura si cabe en RAM (~180 MB float32 + trabajo).
 _MAX_FULL_GRID_FLOATS = 45_000_000
@@ -214,6 +218,55 @@ def discover_cluster_datasets(recortes_root: Path, indices_root: Path) -> list[d
     return out
 
 
+def discover_s1_cluster_datasets(s1indices_root: Path) -> list[dict[str, Any]]:
+    """Un GeoTIFF reciente por índice SAR en ``s1indices/<KEY>/``."""
+    out: list[dict[str, Any]] = []
+    for name in S1_INDEX_KEYS:
+        d = s1indices_root / name
+        if not d.is_dir():
+            continue
+        tifs = [p for p in d.glob("*.tif") if p.is_file() and "_cog" not in p.name.lower()]
+        if not tifs:
+            continue
+        best = max(tifs, key=lambda p: p.stat().st_mtime)
+        out.append({"key": name, "kind": "index", "path": str(best), "label": f"Índice SAR {name}"})
+    return out
+
+
+def _norm_iso_date(s: str) -> str:
+    t = str(s).strip()
+    return t[:10] if len(t) >= 10 else t
+
+
+def band_indexes_from_dates(path: Path, selected_dates: list[str] | None) -> list[int] | None:
+    """
+    Devuelve bandas 1-based para ``selected_dates`` usando ``BAND_DATES_JSON``.
+    Si ``selected_dates`` está vacío/None, retorna ``None`` (todas las bandas).
+    """
+    if not selected_dates:
+        return None
+    wanted = {_norm_iso_date(d) for d in selected_dates if str(d).strip()}
+    if not wanted:
+        return None
+    try:
+        with rasterio.open(path) as src:
+            tags = src.tags()
+            n = int(src.count)
+    except Exception as exc:
+        raise ValueError(f"No se pudo abrir stack para resolver fechas ({path.name}): {exc}") from exc
+    raw = tags.get("BAND_DATES_JSON")
+    if not isinstance(raw, str) or not raw.strip():
+        raise ValueError(f"El stack {path.name} no tiene metadato BAND_DATES_JSON.")
+    try:
+        dates = [str(x) for x in np.asarray(json.loads(raw), dtype=object).tolist()]
+    except Exception as exc:
+        raise ValueError(f"BAND_DATES_JSON inválido en {path.name}: {exc}") from exc
+    out = [i + 1 for i, d in enumerate(dates[:n]) if _norm_iso_date(d) in wanted]
+    if not out:
+        raise ValueError(f"Ninguna fecha seleccionada existe en {path.name}.")
+    return out
+
+
 def _read_array_nan_nodata(src: Any, window: Optional[Window] = None) -> np.ndarray:
     """Lee (C,H,W) float32; píxeles nodata de GDAL → NaN (coherente con stacks que ya usan NaN)."""
     if window is None:
@@ -225,18 +278,24 @@ def _read_array_nan_nodata(src: Any, window: Optional[Window] = None) -> np.ndar
     return arr.astype(np.float32)
 
 
-def _read_raster_features(path: Path) -> tuple[np.ndarray, dict[str, Any]]:
-    """Lee todas las bandas como (C,H,W) float32."""
+def _read_raster_features(path: Path, band_indexes: list[int] | None = None) -> tuple[np.ndarray, dict[str, Any]]:
+    """Lee bandas como (C,H,W) float32; opcionalmente solo ``band_indexes`` (1-based)."""
     with rasterio.open(path) as src:
         if src.count < 1:
             raise ValueError(f"Sin bandas: {path}")
-        data = _read_array_nan_nodata(src)
+        if band_indexes:
+            idx = [int(b) for b in band_indexes if 1 <= int(b) <= int(src.count)]
+            if not idx:
+                raise ValueError(f"No hay bandas válidas para {path.name}")
+            data = _read_array_nan_nodata(src)[np.array(idx) - 1]
+        else:
+            data = _read_array_nan_nodata(src)
         meta = {
             "transform": src.transform,
             "crs": src.crs,
             "width": src.width,
             "height": src.height,
-            "count": src.count,
+            "count": int(data.shape[0]),
             "profile": src.profile.copy(),
         }
     return data, meta
@@ -276,6 +335,7 @@ def prepare_training_matrix(
     path: Path,
     max_samples: int = 50_000,
     random_state: int = 42,
+    band_indexes: list[int] | None = None,
 ) -> tuple[np.ndarray, StandardScaler, np.ndarray, dict[str, Any]]:
     """
     Construye matriz (n_samples, n_features).
@@ -283,7 +343,7 @@ def prepare_training_matrix(
     casi sin píxeles la intersección ``todas las fechas válidas``.
     Solo se excluyen píxeles con **todas** las bandas no finitas.
     """
-    data, meta = _read_raster_features(path)
+    data, meta = _read_raster_features(path, band_indexes=band_indexes)
     c, h, w = data.shape
     medians = _per_band_nan_medians(data)
     meta["band_fill_medians"] = medians
@@ -483,6 +543,7 @@ def predict_gmm_full_raster(
     meta: dict[str, Any],
     output_path: Path,
     block_size: int = 512,
+    band_indexes: list[int] | None = None,
 ) -> np.ndarray:
     """
     Predice etiquetas por píxel. Preferimos **una sola lectura** (igual que el entrenamiento)
@@ -512,19 +573,23 @@ def predict_gmm_full_raster(
             if raw_med is not None
             else np.array([], dtype=np.float32)
         )
-        n_cells = h * w * int(src.count)
-        if medians.size != src.count:
+        idx = [int(b) for b in (band_indexes or []) if 1 <= int(b) <= int(src.count)]
+        use_count = len(idx) if idx else int(src.count)
+        n_cells = h * w * use_count
+        if medians.size != use_count:
             if n_cells <= _MAX_FULL_GRID_FLOATS:
                 logger.warning("Recalculando medianas desde raster completo: %s", path.name)
                 data_once = _read_array_nan_nodata(src)
+                if idx:
+                    data_once = data_once[np.array(idx) - 1]
                 medians = _per_band_nan_medians(data_once)
             else:
                 logger.error(
                     "medianas por banda no coinciden con %s bandas y el raster es demasiado grande para releer; "
                     "re-ejecuta el codo/GMM.",
-                    src.count,
+                    use_count,
                 )
-                medians = np.zeros(src.count, dtype=np.float32)
+                medians = np.zeros(use_count, dtype=np.float32)
 
         def _apply_block(flat: np.ndarray) -> np.ndarray:
             flat_filled, all_bad = _fill_flat_with_medians(flat, medians)
@@ -540,9 +605,11 @@ def predict_gmm_full_raster(
                 "GMM predict: lectura completa %s×%s × %s bandas (una pasada, coherente con entrenamiento)",
                 h,
                 w,
-                src.count,
+                use_count,
             )
             data = _read_array_nan_nodata(src)
+            if idx:
+                data = data[np.array(idx) - 1]
             c = data.shape[0]
             flat = data.reshape(c, h * w).T
             labels_full = _apply_block(flat).reshape(h, w)
@@ -556,6 +623,8 @@ def predict_gmm_full_raster(
                 bh = min(block_size, h - row0)
                 win = Window(0, row0, w, bh)
                 data = _read_array_nan_nodata(src, win)
+                if idx:
+                    data = data[np.array(idx) - 1]
                 _, bh2, bw2 = data.shape
                 if bh2 != bh or bw2 != w:
                     raise ValueError(
@@ -597,10 +666,11 @@ def run_elbow_for_dataset(
     k_max: int,
     max_samples: int,
     random_state: int,
+    band_indexes: list[int] | None = None,
 ) -> dict[str, Any]:
     logger.info("Elbow: leyendo %s", path)
     Xs, scaler, _valid, meta = prepare_training_matrix(
-        path, max_samples=max_samples, random_state=random_state
+        path, max_samples=max_samples, random_state=random_state, band_indexes=band_indexes
     )
     ks, inertias = compute_elbow_inertias(Xs, k_min, k_max, random_state=random_state)
     k_sug = suggest_k_elbow(ks, inertias)
@@ -707,10 +777,11 @@ def run_gmm_for_dataset(
     key: str,
     *,
     dataset_kind: str = "index",
+    band_indexes: list[int] | None = None,
 ) -> dict[str, Any]:
     out_dir.mkdir(parents=True, exist_ok=True)
     Xs, scaler, _v, meta = prepare_training_matrix(
-        path, max_samples=max_samples, random_state=random_state
+        path, max_samples=max_samples, random_state=random_state, band_indexes=band_indexes
     )
     n_comp = max(1, min(int(n_components), int(Xs.shape[0]), 30))
     if n_comp != n_components:
@@ -722,7 +793,7 @@ def run_gmm_for_dataset(
         dest = _unique_dest_path(out_dir, multiband_gmm_output_filename(path, n_comp))
     else:
         dest = out_dir / f"{key}_gmm_k{n_comp}.tif"
-    labels_full = predict_gmm_full_raster(path, gmm, scaler, meta, dest)
+    labels_full = predict_gmm_full_raster(path, gmm, scaler, meta, dest, band_indexes=band_indexes)
 
     step = max(1, max(labels_full.shape) // 400)
     small = labels_full[::step, ::step]

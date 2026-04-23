@@ -319,41 +319,84 @@ def _is_planet_true_color_preview(meta: dict, src_count: int) -> bool:
     return bool(lab and is_planetscope_ps_recorte_filename(lab))
 
 
-def _stretch_band_to_u8_planet_true_color(band: np.ndarray) -> np.ndarray:
+def _planet_true_color_stack_to_rgb_u8(stack: np.ndarray) -> np.ndarray:
     """
-    Color natural PlanetScope (R=band6, G=band4, B=band2).
+    Color natural PlanetScope: ``stack`` (3,H,W) en orden R,G,B (bandas 6,4,2 crudas del composite).
 
-    Los composites Analytic suelen ir como DN acotado (cientos–miles), no como BOA Sentinel ×10000.
-    EO Browser / scripts de Planet usan ``sample.red / 3000`` (misma escala por canal); aquí
-    detectamos DN alto (p99 > 50) y aplicamos esa división; si ya parece reflectancia 0–1, se
-    escala por 0.3. Luego estirado por percentiles y gamma suave para miniaturas legibles.
+    Mucho lienzo negro alrededor del polígono hace que los percentiles globales fallen (p99≈0) o
+    compriman el histograma hacia el blanco. Aquí se infiere la escala con píxeles que tienen señal,
+    el estirado 2–98 va solo sobre esos píxeles, y se aplica gamma > 1 para bajar highlights
+    (antes ``y**1.07`` con gamma mal interpretado aclaraba el cielo/cultivo).
     """
-    x = band.astype(np.float64)
-    finite = np.isfinite(x)
-    if not np.any(finite):
-        return np.zeros(x.shape, dtype=np.uint8)
+    s = stack.astype(np.float64)
+    h, w = int(s.shape[1]), int(s.shape[2])
+    out = np.zeros((h, w, 3), dtype=np.uint8)
+    valid = np.isfinite(s).all(axis=0)
+    if not np.any(valid):
+        return out
 
-    p99 = float(np.nanpercentile(x[finite], 99.0))
-    r = np.full_like(x, np.nan, dtype=np.float64)
-    # No recortar a [0, 1] antes del percentil: DN altos (>3000) quedarían todos en 1.0 y la RGB se lava.
-    if p99 > 50.0:
-        r[finite] = x[finite] / 3000.0
+    raw_energy = np.sum(np.abs(s), axis=0)
+    infer = valid & (raw_energy > 0)
+    if not np.any(infer):
+        infer = valid
+
+    flat = s[:, infer].ravel()
+    p50 = float(np.percentile(flat, 50.0))
+    p99 = float(np.percentile(flat, 99.0))
+    mx = float(np.max(flat))
+
+    # Misma lógica de escalas que la versión por banda, pero una sola decisión para R,G,B.
+    if p99 <= 1.15 and mx <= 1.5:
+        r = np.where(valid, np.clip(s, 0.0, None), np.nan)
+    elif 12 <= p99 <= 100 and mx <= 105 and p50 >= 1.0:
+        # Reflectancia en % (0–100), típ. mediana ≥1
+        r = np.where(valid, s / 100.0, np.nan)
+    elif mx > 12000 or (p99 > 6000 and p50 > 400):
+        r = np.where(valid, s / 20000.0, np.nan)
+    elif p99 > 800 or p50 > 120 or (p99 > 400 and p50 > 40):
+        r = np.where(valid, s / 10000.0, np.nan)
+    elif p99 > 35 or mx > 80:
+        r = np.where(valid, s / 3800.0, np.nan)
     else:
-        r[finite] = x[finite] / 0.3
+        r = np.where(valid, s / 3000.0, np.nan)
 
-    lo, hi = np.nanpercentile(r, [2.0, 98.0])
-    if not (math.isfinite(lo) and math.isfinite(hi)) or hi <= lo:
-        lo, hi = np.nanpercentile(r, [1.0, 99.0])
-    if not (math.isfinite(lo) and math.isfinite(hi)) or hi <= lo:
-        lo = float(np.nanmin(r))
-        hi = float(np.nanmax(r))
-    if hi <= lo:
-        hi = lo + 1e-9
+    sig = np.nanmax(r, axis=0)
+    p5_sig = float(np.nanpercentile(sig[valid], 5.0)) if np.any(valid) else 0.0
+    eps = max(1e-7, p5_sig * 0.2)
+    content = valid & np.isfinite(sig) & (sig > eps)
+    if not np.any(content):
+        content = valid & np.isfinite(sig)
 
-    y = (r - lo) / (hi - lo)
-    y = np.clip(np.where(np.isfinite(y), y, 0.0), 0.0, 1.0)
-    y = np.power(y, 0.9)
-    return (y * 255.0).astype(np.uint8)
+    reflectance_like = p99 <= 1.15 and mx <= 1.5
+    for i in range(3):
+        chan = r[i][content]
+        if chan.size == 0:
+            continue
+        lo, hi = np.percentile(chan, (2.0, 98.0))
+        if not (math.isfinite(lo) and math.isfinite(hi)) or hi <= lo:
+            lo, hi = np.percentile(chan, (0.5, 99.5))
+        if hi <= lo:
+            lo = float(np.nanmin(chan))
+            hi = float(np.nanmax(chan))
+        if hi <= lo:
+            hi = lo + 1e-9
+        # Escenas muy uniformes y claras: forzar un mínimo de contraste
+        if reflectance_like and (hi - lo) < 0.055:
+            hi = min(lo + 0.22, 1.0)
+            if hi <= lo:
+                hi = lo + 1e-9
+
+        plane = r[i]
+        span = hi - lo
+        if span < 1e-6:
+            y = np.where(np.isfinite(plane), 0.5, 0.0)
+        else:
+            y = (plane - lo) / span
+        y = np.clip(np.where(np.isfinite(y), y, 0.0), 0.0, 1.0)
+        y = np.power(y, 1.16)
+        out[:, :, i] = (y * 255.0).astype(np.uint8)
+
+    return out
 
 
 def _stretch_band_to_u8_sentinel_friendly(band: np.ndarray) -> np.ndarray:
@@ -553,11 +596,13 @@ def render_raster_preview_png(
     elif arr.shape[0] == 2:
         arr = np.concatenate([arr, arr[:1]], axis=0)
 
-    rgb = np.zeros((arr.shape[1], arr.shape[2], 3), dtype=np.uint8)
     use_planet_tc = _is_planet_true_color_preview(meta, src_count)
-    stretch = _stretch_band_to_u8_planet_true_color if use_planet_tc else _stretch_band_to_u8_sentinel_friendly
-    for i in range(3):
-        rgb[:, :, i] = stretch(arr[i])
+    if use_planet_tc:
+        rgb = _planet_true_color_stack_to_rgb_u8(arr)
+    else:
+        rgb = np.zeros((arr.shape[1], arr.shape[2], 3), dtype=np.uint8)
+        for i in range(3):
+            rgb[:, :, i] = _stretch_band_to_u8_sentinel_friendly(arr[i])
 
     img = Image.fromarray(rgb, mode="RGB")
     buf = io.BytesIO()

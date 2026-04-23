@@ -6,6 +6,8 @@ export default function LayersPanel({
   onToggleVisibility,
   onZoomToLayer,
   onHideLayer,
+  onOpenDashboard,
+  dashboardDisabled = false,
 }) {
   const orderedLayers = useMemo(() => {
     const vectors = mapLayers.filter((l) => l.kind === "vector");
@@ -24,6 +26,15 @@ export default function LayersPanel({
     <div className="layers-panel">
       <div className="layers-panel-header">
         <span>Capas ({mapLayers.length})</span>
+        <button
+          type="button"
+          className="layers-dashboard-btn"
+          onClick={() => onOpenDashboard?.()}
+          disabled={dashboardDisabled}
+          title={dashboardDisabled ? "Selecciona un proyecto para abrir el dashboard" : "Abrir dashboard avanzado"}
+        >
+          Dashboard
+        </button>
       </div>
       <ul className="layers-list">
         {mapLayers.length === 0 ? (

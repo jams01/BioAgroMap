@@ -33,6 +33,10 @@ function clamp01(x) {
   return Math.min(1, Math.max(0, x));
 }
 
+function normIsoDate(s) {
+  return String(s || "").slice(0, 10);
+}
+
 const COLOR_SERIES = "#1565c0";
 const COLOR_MEAN_LINE = "#c62828";
 /** Tendencia lineal (OLS) — violeta (S2 y S1). */
@@ -237,6 +241,26 @@ function yPixelAt(yVal, h, padT, padB, yMin, yMax) {
   return padT + innerH * (1 - (y - yMin) / (yMax - yMin));
 }
 
+function buildLegendTooltipText({ isS1Sar, isPs, meta }) {
+  const sensorNote = isS1Sar
+    ? "S1 SAR: atípicas con IQR Tukey factor 2.5; filtro solo si hay >=10 series (IQR 0 => no se descarta)."
+    : isPs
+      ? "PlanetScope: atípicas con IQR Tukey factor 1.5; filtro si hay >=4 series (IQR 0 => no se descarta)."
+      : "S2: atípicas con IQR Tukey factor 1.5; filtro si hay >=4 series (IQR 0 => no se descarta).";
+  const sample =
+    meta?.n_valid_pixels != null && meta?.n_sampled != null
+      ? ` Muestreo inicial: ${meta.n_sampled.toLocaleString()} de ${meta.n_valid_pixels.toLocaleString()} píxeles válidos.`
+      : "";
+  return [
+    "Líneas tenues = series por píxel (0–1, min-max por escena/fecha).",
+    "Eje X: dd/mm/aa (etiquetas a 45°).",
+    "Roja = media temporal tras filtro.",
+    "Violeta = tendencia lineal (OLS).",
+    "Ref. escenas = medias espaciales por fecha del servidor.",
+    sensorNote + sample,
+  ].join(" ");
+}
+
 function IndexChart({
   indexKey,
   points,
@@ -244,6 +268,7 @@ function IndexChart({
   perPixelMeta,
   temporalStatsFromApi,
   isS1Sar = false,
+  activeSceneDate = null,
 }) {
   const W = 900;
   const H = 260;
@@ -338,58 +363,51 @@ function IndexChart({
   const fmtDate = formatDateLabelDdMmYy;
 
   const nScenes = points.length;
+  const activeIdx = (() => {
+    const target = normIsoDate(activeSceneDate);
+    if (!target) return -1;
+    return xs.findIndex((d) => normIsoDate(d) === target);
+  })();
+  const activeX =
+    activeIdx >= 0 ? xPixelAt(activeIdx, times, W, padL, padR, tMin, tMax, xs.length) : null;
 
   const apiMu = temporalStatsFromApi?.mean;
   const apiSigma = temporalStatsFromApi?.std;
 
-  const statsLine = usePixels ? (
-    <>
-      {isS1Sar ? "Fechas" : "Escenas"}: {nScenes} · series dibujadas: {filteredSeries.length}
-      {nSeriesRaw > 0 ? (
-        <>
-          {" "}
-          (muestreo {nSeriesRaw}
-          {perPixelMeta?.n_valid_pixels != null
-            ? ` de ${perPixelMeta.n_valid_pixels.toLocaleString()} píxeles válidos`
-            : ""}
-          {nOutliersRemoved > 0
-            ? ` · ${nOutliersRemoved} atípicas (IQR Tukey, factor ${outlierIqrFactor})`
-            : ""})
-        </>
-      ) : null}
-      <br />
-      <span className="vts-chart-stats-detail">
-        Curva media (rojo, tras filtro): μ temporal ={" "}
-        {muTemporalCurve != null ? muTemporalCurve.toFixed(4) : "—"} · σ temporal ={" "}
-        {sigmaTemporalCurve != null ? sigmaTemporalCurve.toFixed(4) : "—"}
-        {apiMu != null && Number.isFinite(apiMu) ? (
-          <>
-            {" "}
-            · ref. escenas (media espacial/fecha): μ = {apiMu.toFixed(4)}
-            {apiSigma != null && Number.isFinite(apiSigma) ? ` · σ = ${apiSigma.toFixed(4)}` : ""}
-          </>
-        ) : null}
-      </span>
-    </>
-  ) : (
-    <>
-      {isS1Sar ? "Fechas" : "Escenas"}: {nScenes}
-      <br />
-      <span className="vts-chart-stats-detail">
-        Media espacial por fecha: μ temporal = {apiMu != null && Number.isFinite(apiMu) ? apiMu.toFixed(4) : "—"} · σ
-        temporal = {apiSigma != null && Number.isFinite(apiSigma) ? apiSigma.toFixed(4) : "—"}
-      </span>
-    </>
-  );
+  const statsTooltip = usePixels
+    ? `${isS1Sar ? "Fechas" : "Escenas"}: ${nScenes} · series dibujadas: ${filteredSeries.length}${
+        nSeriesRaw > 0
+          ? ` (muestreo ${nSeriesRaw}${
+              perPixelMeta?.n_valid_pixels != null ? ` de ${perPixelMeta.n_valid_pixels.toLocaleString()} píxeles válidos` : ""
+            }${nOutliersRemoved > 0 ? ` · ${nOutliersRemoved} atípicas (IQR Tukey, factor ${outlierIqrFactor})` : ""})`
+          : ""
+      }. Curva media (rojo, tras filtro): μ temporal = ${
+        muTemporalCurve != null ? muTemporalCurve.toFixed(4) : "—"
+      } · σ temporal = ${sigmaTemporalCurve != null ? sigmaTemporalCurve.toFixed(4) : "—"}${
+        apiMu != null && Number.isFinite(apiMu)
+          ? ` · ref. escenas (media espacial/fecha): μ = ${apiMu.toFixed(4)}${
+              apiSigma != null && Number.isFinite(apiSigma) ? ` · σ = ${apiSigma.toFixed(4)}` : ""
+            }`
+          : ""
+      }`
+    : `${isS1Sar ? "Fechas" : "Escenas"}: ${nScenes}. Media espacial por fecha: μ temporal = ${
+        apiMu != null && Number.isFinite(apiMu) ? apiMu.toFixed(4) : "—"
+      } · σ temporal = ${apiSigma != null && Number.isFinite(apiSigma) ? apiSigma.toFixed(4) : "—"}`;
 
   return (
     <div className="vts-chart-block">
       <div className="vts-chart-heading">
         <h4 className="vts-chart-title">
-          {indexKey}
-          <span className="vts-chart-scale-hint"> (eje Y: 0 a 1)</span>
+          {indexKey} <span className="vts-chart-scale-hint">(0–1)</span>
         </h4>
-        <p className="vts-chart-stats vts-chart-stats-multiline">{statsLine}</p>
+        <button
+          type="button"
+          className="vts-info-icon"
+          title={`Info ${indexKey}: ${statsTooltip}`}
+          aria-label={`Información ${indexKey}`}
+        >
+          i
+        </button>
       </div>
       <svg
         className="vts-chart-svg"
@@ -433,6 +451,18 @@ function IndexChart({
         >
           Índice
         </text>
+        {Number.isFinite(activeX) ? (
+          <line
+            x1={activeX}
+            x2={activeX}
+            y1={padT}
+            y2={padT + innerH}
+            stroke="#4b5563"
+            strokeWidth={2.4}
+            strokeDasharray="4 3"
+            opacity={0.95}
+          />
+        ) : null}
         {usePixels
           ? filteredSeries.map((series, idx) => {
               const d = buildPathTimeScaled(
@@ -551,7 +581,7 @@ function IndexChart({
   );
 }
 
-export default function VegetationTimeSeriesCharts({ data }) {
+export default function VegetationTimeSeriesCharts({ data, onlyIndexKey = null, activeSceneDate = null }) {
   const rawPoints = data?.points?.length ? [...data.points] : [];
   const dateFallback =
     Array.isArray(data?.dates) && data.dates.length
@@ -559,12 +589,23 @@ export default function VegetationTimeSeriesCharts({ data }) {
       : [];
   const points = rawPoints.length ? rawPoints : dateFallback;
 
-  const keys = Array.isArray(data.indices) && data.indices.length ? data.indices : INDEX_KEYS;
+  const allKeys = Array.isArray(data.indices) && data.indices.length ? data.indices : INDEX_KEYS;
+  const keys =
+    onlyIndexKey && allKeys.includes(onlyIndexKey)
+      ? [onlyIndexKey]
+      : onlyIndexKey
+        ? []
+        : allKeys;
+  const compact = Boolean(onlyIndexKey);
 
   const pp = data?.per_pixel;
   const seriesMap = pp?.series_by_index;
   const hasPixelSeries =
     seriesMap && typeof seriesMap === "object" && keys.some((k) => (seriesMap[k]?.length ?? 0) > 0);
+
+  if (onlyIndexKey && keys.length === 0) {
+    return <p className="vts-empty">Sin serie para el índice {onlyIndexKey}.</p>;
+  }
 
   if (!points.length && !hasPixelSeries) {
     return <p className="vts-empty">Sin datos.</p>;
@@ -580,40 +621,17 @@ export default function VegetationTimeSeriesCharts({ data }) {
 
   const isS1Sar = data?.source === "s1_sar";
   const isPs = data?.pipeline_variant === "ps";
+  const legendTooltip = buildLegendTooltipText({ isS1Sar, isPs, meta });
 
   return (
-    <div className="vts-charts-wrap">
-      <p className="vts-chart-legend">
-        <strong>Leyenda:</strong> líneas tenues = series por píxel (0–1, min-max por{" "}
-        {isS1Sar ? "fecha (SAR)" : isPs ? "escena (PlanetScope 8 bandas)" : "escena (L2A)"}). Eje X:{" "}
-        <strong>dd/mm/aa</strong>, etiquetas a <strong>45°</strong>. Línea{" "}
-        <span className="vts-legend-mean">roja</span> = media temporal entre píxeles no atípicos (tras filtro). Línea{" "}
-        <span style={{ color: COLOR_TREND_LINE, fontWeight: 600 }}>violeta</span> = tendencia lineal (OLS) sobre esa
-        media. «ref. escenas» = medias espaciales por fecha del servidor.{" "}
-        {isS1Sar ? (
-          <>
-            <strong>S1 SAR:</strong> atípicas con IQR Tukey <strong>factor 2.5</strong>; filtro solo si hay{" "}
-            <strong>≥10</strong> series (IQR 0 → no se descarta ninguna).
-          </>
-        ) : isPs ? (
-          <>
-            <strong>PlanetScope:</strong> mismos índices que el paso 3; atípicas con IQR Tukey{" "}
-            <strong>factor 1.5</strong>; filtro si hay <strong>≥4</strong> series (IQR 0 → no se descarta ninguna).
-          </>
-        ) : (
-          <>
-            <strong>S2:</strong> atípicas con IQR Tukey <strong>factor 1.5</strong>; filtro si hay{" "}
-            <strong>≥4</strong> series (IQR 0 → no se descarta ninguna).
-          </>
-        )}
-        {meta?.n_valid_pixels != null && meta?.n_sampled != null ? (
-          <>
-            {" "}
-            Muestreo inicial: <strong>{meta.n_sampled.toLocaleString()}</strong> de{" "}
-            <strong>{meta.n_valid_pixels.toLocaleString()}</strong> píxeles válidos.
-          </>
-        ) : null}
-      </p>
+    <div className={`vts-charts-wrap${compact ? " vts-charts-wrap--compact" : ""}`}>
+      {!compact ? (
+        <div className="vts-chart-legend-icon-wrap">
+          <button type="button" className="vts-info-icon" title={legendTooltip} aria-label="Información de la serie">
+            i
+          </button>
+        </div>
+      ) : null}
       {keys.map((key) => (
         <IndexChart
           key={key}
@@ -623,6 +641,7 @@ export default function VegetationTimeSeriesCharts({ data }) {
           perPixelMeta={meta}
           temporalStatsFromApi={data?.temporal_stats?.[key]}
           isS1Sar={isS1Sar}
+          activeSceneDate={activeSceneDate}
         />
       ))}
     </div>

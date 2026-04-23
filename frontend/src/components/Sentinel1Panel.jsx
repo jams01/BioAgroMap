@@ -55,11 +55,17 @@ export default function Sentinel1Panel({
   stackMode,
   setStackMode,
   onOpenPreproGallery,
-  onOpenPreproClusterViz,
   recortePipelineBusy,
   s1SarStacksBusy = false,
   onS1GrdRecortes,
   onS1SarIndexStacks,
+  clusterElbowLoading,
+  clusterGmmLoading,
+  clusterElbowResults,
+  clusterGmmResults,
+  onClusterElbow,
+  onClusterGmm,
+  onLoadPersistedClusterGmm,
 }) {
   const vectorLayers = mapLayers.filter((l) => l.kind === "vector");
   const busy = loading || recortePipelineBusy || s1SarStacksBusy;
@@ -79,6 +85,14 @@ export default function Sentinel1Panel({
   const [s1VtsData, setS1VtsData] = useState(null);
   const [s1VtsLoading, setS1VtsLoading] = useState(false);
   const [s1VtsError, setS1VtsError] = useState("");
+  const [s1ClusterModalOpen, setS1ClusterModalOpen] = useState(false);
+  const [s1ClusterResultsModalOpen, setS1ClusterResultsModalOpen] = useState(false);
+  const [s1ClusterPickerOpen, setS1ClusterPickerOpen] = useState(false);
+  const [s1ClusterSelectedDates, setS1ClusterSelectedDates] = useState([]);
+  const [s1ClusterPeekHint, setS1ClusterPeekHint] = useState("");
+  const [s1ClusterLoadingPersisted, setS1ClusterLoadingPersisted] = useState(false);
+  const [s1ClusterResultsZoom, setS1ClusterResultsZoom] = useState(100);
+  const [s1GmmK, setS1GmmK] = useState(5);
 
   useEffect(() => {
     setS1ModalOpen(false);
@@ -90,7 +104,63 @@ export default function Sentinel1Panel({
     setS1VtsModalOpen(false);
     setS1VtsData(null);
     setS1VtsError("");
+    setS1ClusterModalOpen(false);
+    setS1ClusterResultsModalOpen(false);
+    setS1ClusterPickerOpen(false);
+    setS1ClusterSelectedDates([]);
+    setS1ClusterPeekHint("");
+    setS1ClusterResultsZoom(100);
+    setS1GmmK(5);
   }, [projectId]);
+
+  useEffect(() => {
+    const ds = clusterElbowResults?.datasets;
+    if (!ds?.length) return;
+    const sk = ds[0]?.suggested_k;
+    if (sk != null && Number.isFinite(Number(sk))) {
+      setS1GmmK(Math.max(1, Math.min(30, Number(sk))));
+    }
+  }, [clusterElbowResults]);
+
+  useEffect(() => {
+    if (clusterGmmResults?.results?.length) {
+      setS1ClusterResultsModalOpen(true);
+      setS1ClusterModalOpen(false);
+    }
+  }, [clusterGmmResults]);
+
+  const s1GmmIndexResults = clusterGmmResults?.results?.filter((r) => r.kind === "index") ?? [];
+
+  async function openS1ClusterGmmResultsOrHint() {
+    if (clusterGmmResults?.results?.length) {
+      setS1ClusterResultsModalOpen(true);
+      setS1ClusterPeekHint("");
+      return;
+    }
+    if (!onLoadPersistedClusterGmm) {
+      setS1ClusterPeekHint("No hay resultados de cluster GMM en memoria. Ejecuta «4) Cluster» primero.");
+      window.setTimeout(() => setS1ClusterPeekHint(""), 7000);
+      return;
+    }
+    setS1ClusterLoadingPersisted(true);
+    setS1ClusterPeekHint("");
+    try {
+      const data = await onLoadPersistedClusterGmm();
+      if (data?.results?.length) {
+        setS1ClusterResultsModalOpen(true);
+        return;
+      }
+      setS1ClusterPeekHint(
+        "No se encontraron GeoTIFF de GMM en cluster_s1_gmm/ de este proyecto (o los nombres no coinciden con el formato esperado)."
+      );
+      window.setTimeout(() => setS1ClusterPeekHint(""), 9000);
+    } catch (e) {
+      setS1ClusterPeekHint(formatApiErrorDetail(e));
+      window.setTimeout(() => setS1ClusterPeekHint(""), 9000);
+    } finally {
+      setS1ClusterLoadingPersisted(false);
+    }
+  }
 
   /**
    * La pestaña SI no ofrece RGB ni índices S2; al entrar desde Prepro, mapear modos de visualización.
@@ -227,12 +297,12 @@ export default function Sentinel1Panel({
         type="button"
         onClick={() => {
           if (stackMode === "visual-cluster") {
-            void onOpenPreproClusterViz?.();
+            void openS1ClusterGmmResultsOrHint();
           } else {
             onOpenPreproGallery?.();
           }
         }}
-        disabled={!projectId || !token || loading}
+        disabled={!projectId || !token || loading || s1ClusterLoadingPersisted}
       >
         {stackMode === "visual-s1-vv"
           ? "Abrir galería VV"
@@ -244,6 +314,16 @@ export default function Sentinel1Panel({
                 ? "Abrir galería de índices SAR (serie temporal)"
                 : "Abrir visualización de clusters GMM"}
       </button>
+      {s1ClusterPeekHint ? (
+        <p className="prepro-hint" role="status">
+          {s1ClusterPeekHint}
+        </p>
+      ) : null}
+      {s1ClusterLoadingPersisted ? (
+        <p className="prepro-hint" role="status">
+          Cargando resultados GMM desde cluster_s1_gmm/…
+        </p>
+      ) : null}
 
       <div className="indices-section">
         <div className="indices-section-title">
@@ -265,6 +345,24 @@ export default function Sentinel1Panel({
           disabled={busy || !projectId || !token}
         >
           Estimar índices SAR
+        </button>
+      </div>
+
+      <div className="cluster-actions-row">
+        <button
+          type="button"
+          onClick={() => setS1ClusterModalOpen(true)}
+          disabled={busy || !projectId || !token}
+        >
+          4) Cluster
+        </button>
+        <button
+          type="button"
+          className="cluster-open-results-btn"
+          disabled={busy || !projectId || !token || s1ClusterLoadingPersisted}
+          onClick={() => void openS1ClusterGmmResultsOrHint()}
+        >
+          Ver resultados GMM
         </button>
       </div>
 
@@ -428,14 +526,233 @@ export default function Sentinel1Panel({
         </div>
       ) : null}
 
+      {s1ClusterModalOpen ? (
+        <div
+          className="index-modal-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="s1-cluster-modal-title"
+          onClick={() => setS1ClusterModalOpen(false)}
+        >
+          <div className="index-modal cluster-flow-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="index-modal-header cluster-modal-header-tools">
+              <h3 id="s1-cluster-modal-title">4) Cluster SAR (codo + GMM)</h3>
+              <button
+                type="button"
+                className="index-modal-close"
+                onClick={() => setS1ClusterModalOpen(false)}
+                aria-label="Cerrar"
+              >
+                ×
+              </button>
+            </div>
+            <div className="index-modal-body cluster-flow-body">
+              <p className="cluster-flow-intro">
+                Selecciona fechas/escenas para filtrar bandas en <code>s1indices/</code> y ejecutar
+                clustering por índice SAR (<strong>RVI, RFDI, VV/VH, VH/VV y NRPB</strong>). Primero
+                calcula el método del codo y luego ejecuta GMM con una sola K para todos los índices.
+              </p>
+              <div className="cluster-flow-toolbar">
+                <button
+                  type="button"
+                  className="indices-run-btn"
+                  onClick={() => {
+                    // Evita superposición de modales: abrir selector de escenas en primer plano.
+                    setS1ClusterModalOpen(false);
+                    setS1ClusterPickerOpen(true);
+                  }}
+                  disabled={!projectId || !token}
+                >
+                  Seleccionar escenas (fechas)
+                </button>
+                <button
+                  type="button"
+                  className="indices-run-btn"
+                  onClick={() => onClusterElbow?.(s1ClusterSelectedDates)}
+                  disabled={clusterElbowLoading || !s1ClusterSelectedDates.length}
+                  title={
+                    !s1ClusterSelectedDates.length
+                      ? "Selecciona al menos una fecha para cluster SAR"
+                      : undefined
+                  }
+                >
+                  {clusterElbowLoading ? "Calculando codo…" : "Calcular método del codo"}
+                </button>
+                {clusterElbowResults?.datasets?.length ? (
+                  <>
+                    <label className="cluster-unified-k-label">
+                      K para todos los índices (1–30)
+                      <input
+                        type="number"
+                        min={1}
+                        max={30}
+                        value={s1GmmK}
+                        onChange={(e) => {
+                          const n = Number(e.target.value);
+                          setS1GmmK(Number.isFinite(n) ? Math.max(1, Math.min(30, Math.round(n))) : 1);
+                        }}
+                      />
+                    </label>
+                    <button
+                      type="button"
+                      className="indices-run-btn"
+                      onClick={async () => {
+                        if (!onClusterGmm || !clusterElbowResults?.datasets?.length) return;
+                        const k = Math.max(1, Math.min(30, Math.round(Number(s1GmmK)) || 1));
+                        const kByKey = Object.fromEntries(clusterElbowResults.datasets.map((d) => [d.key, k]));
+                        await onClusterGmm(kByKey, s1ClusterSelectedDates);
+                      }}
+                      disabled={
+                        clusterGmmLoading ||
+                        !clusterElbowResults?.datasets?.length ||
+                        !Number.isFinite(s1GmmK) ||
+                        s1GmmK < 1
+                      }
+                    >
+                      {clusterGmmLoading ? "Ejecutando GMM…" : "Ejecutar GMM"}
+                    </button>
+                  </>
+                ) : null}
+              </div>
+              <p className="cluster-meta">
+                Fechas seleccionadas: <strong>{s1ClusterSelectedDates.length}</strong>
+              </p>
+
+              {clusterElbowResults?.datasets?.length ? (
+                <div className="cluster-elbow-row">
+                  {clusterElbowResults.datasets.map((d) => (
+                    <div key={d.key} className="cluster-elbow-cell">
+                      <h4>{d.label}</h4>
+                      {d.elbow_plot_png_base64 ? (
+                        <img
+                          className="cluster-elbow-img"
+                          alt={`Codo ${d.key}`}
+                          src={`data:image/png;base64,${d.elbow_plot_png_base64}`}
+                        />
+                      ) : null}
+                      <p className="cluster-meta">
+                        K sugerido (referencia): {d.suggested_k} · Train: {d.n_train_pixels} px · {d.n_features} feat.
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {s1ClusterResultsModalOpen && clusterGmmResults?.results?.length ? (
+        <div
+          className="cluster-results-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="s1-cluster-results-title"
+          onClick={() => setS1ClusterResultsModalOpen(false)}
+        >
+          <div className="cluster-results-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="index-modal-header cluster-modal-header-tools cluster-results-modal-header">
+              <h3 id="s1-cluster-results-title">Resultados S1 — clusters GMM</h3>
+              <div
+                className="cluster-zoom-toolbar cluster-zoom-toolbar--single-line"
+                onClick={(e) => e.stopPropagation()}
+                role="group"
+                aria-label="Zoom de las vistas"
+              >
+                <span className="cluster-zoom-label">Zoom</span>
+                <button
+                  type="button"
+                  className="cluster-zoom-btn"
+                  aria-label="Reducir zoom"
+                  onClick={() => setS1ClusterResultsZoom((z) => Math.max(50, z - 10))}
+                >
+                  −
+                </button>
+                <input
+                  className="cluster-zoom-range"
+                  type="range"
+                  min={50}
+                  max={200}
+                  step={5}
+                  value={s1ClusterResultsZoom}
+                  onChange={(e) => setS1ClusterResultsZoom(Number(e.target.value))}
+                />
+                <span className="cluster-zoom-pct">{s1ClusterResultsZoom}%</span>
+                <button
+                  type="button"
+                  className="cluster-zoom-btn"
+                  aria-label="Aumentar zoom"
+                  onClick={() => setS1ClusterResultsZoom((z) => Math.min(200, z + 10))}
+                >
+                  +
+                </button>
+                <button
+                  type="button"
+                  className="cluster-zoom-reset"
+                  onClick={() => setS1ClusterResultsZoom(100)}
+                >
+                  100%
+                </button>
+              </div>
+              <button
+                type="button"
+                className="index-modal-close"
+                onClick={() => setS1ClusterResultsModalOpen(false)}
+                aria-label="Cerrar"
+              >
+                ×
+              </button>
+            </div>
+            <div className="index-modal-body cluster-results-body">
+              {clusterGmmResults.pipeline_build ? (
+                <p className="cluster-meta cluster-pipeline-build">
+                  Pipeline: <code>{clusterGmmResults.pipeline_build}</code>
+                </p>
+              ) : null}
+              <div className="cluster-results-zoom-inner" style={{ zoom: s1ClusterResultsZoom / 100 }}>
+                {s1GmmIndexResults.length ? (
+                  <div className="cluster-gmm-grid cluster-gmm-grid--row1">
+                    {s1GmmIndexResults.map((r) => (
+                      <div key={r.key} className="cluster-gmm-tile">
+                        <h5 className="cluster-gmm-tile-title">
+                          <code>{r.output_basename ?? r.key}</code>
+                          <span className="cluster-gmm-k"> · K={r.k_used ?? "—"}</span>
+                        </h5>
+                        <p className="cluster-meta">{r.label}</p>
+                        {r.preview_png_base64 ? (
+                          <img
+                            className="cluster-elbow-img"
+                            alt={`Clusters ${r.key}`}
+                            src={`data:image/png;base64,${r.preview_png_base64}`}
+                          />
+                        ) : null}
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+                <p className="cluster-out-dir">
+                  Salidas GeoTIFF: <code>{clusterGmmResults.output_dir}</code>
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       <RgbTimeSeriesGallery
-        open={s1GalleryKind !== null}
-        mode={s1GalleryKind === "ts" ? "s1SarTimeSeriesSelect" : "s1SarIndexSelect"}
+        open={s1GalleryKind !== null || s1ClusterPickerOpen}
+        mode={s1ClusterPickerOpen ? "s1SarTimeSeriesSelect" : s1GalleryKind === "ts" ? "s1SarTimeSeriesSelect" : "s1SarIndexSelect"}
         galleryVisualMode="rgb"
         indexCatalog={S1_SAR_INDEX_CATALOG}
         selectedIndices={selectedS1SarIndices}
         onSelectedIndicesChange={setSelectedS1SarIndices}
-        onClose={() => setS1GalleryKind(null)}
+        onClose={() => {
+          if (s1ClusterPickerOpen) {
+            setS1ClusterModalOpen(true);
+          }
+          setS1GalleryKind(null);
+          setS1ClusterPickerOpen(false);
+        }}
         canEstimate={selectedS1SarIndices.length > 0}
         onEstimateIndices={(payload) => {
           if (
@@ -452,6 +769,15 @@ export default function Sentinel1Panel({
           setS1GalleryKind(null);
         }}
         onTimeSeries={async (arg) => {
+          if (s1ClusterPickerOpen) {
+            if (arg && typeof arg === "object" && Array.isArray(arg.s1SarDates)) {
+              const picked = [...new Set(arg.s1SarDates.map((d) => String(d).slice(0, 10)).filter(Boolean))].sort();
+              setS1ClusterSelectedDates(picked);
+            }
+            setS1ClusterPickerOpen(false);
+            setS1ClusterModalOpen(true);
+            return;
+          }
           if (!token || !projectId) return;
           if (!arg || typeof arg !== "object" || !Array.isArray(arg.s1SarDates) || !arg.s1SarDates.length) return;
           setS1VtsLoading(true);

@@ -37,7 +37,7 @@ def normalize_requested_indices(
     """
     Lista desde API/UI → pares (nombre carpeta / prefijo archivo, nombre para compute_*_index_arrays).
 
-    ``pipeline_variant=ps``: NDVI, NDWI, MSAVI2, MTVI2, VARI, TGI, KNDVI, GIYI, MCARI, NDRE, RSTRUCTURE (NDRE/NDVI, estructura de dosel).
+    ``pipeline_variant=ps``: NDVI, EVI, NDWI, MSAVI2, MTVI2, VARI, TGI, KNDVI, GIYI, MCARI, NDRE, RSTRUCTURE (NDRE/NDVI, estructura de dosel).
     ``pipeline_variant=s2``: NDVI, EVI, NDWI (NIR–SWIR), CIre, MCARI.
     """
     from app.services.preprocess_pipeline_variant import normalize_pipeline_variant
@@ -76,6 +76,7 @@ def _normalize_requested_indices_ps(raw: list[str]) -> list[tuple[str, str]]:
     if raw and any(str(s).strip().upper() == "TODOS" for s in raw):
         raw = [
             "NDVI",
+            "EVI",
             "NDWI",
             "MSAVI2",
             "MTVI2",
@@ -89,6 +90,7 @@ def _normalize_requested_indices_ps(raw: list[str]) -> list[tuple[str, str]]:
         ]
     key_map = {
         "NDVI": ("NDVI", "NDVI"),
+        "EVI": ("EVI", "EVI"),
         "NDWI": ("NDWI", "NDWI"),
         "MSAVI2": ("MSAVI2", "MSAVI2"),
         "MTVI2": ("MTVI2", "MTVI2"),
@@ -280,6 +282,10 @@ def compute_ps_index_arrays(bgri: dict[str, np.ndarray], index_name: str) -> np.
     name = index_name.upper()
     if name == "NDVI":
         return _safe_div(ir - r, ir + r).astype(np.float32)
+    if name == "EVI":
+        L = _evi_offset_den(r)
+        den = ir + 6.0 * r - 7.5 * b + L
+        return _safe_div(2.5 * (ir - r), den).astype(np.float32)
     if name == "NDRE":
         # (NIR − RedEdge) / (NIR + RedEdge); NIR=PS8, RedEdge=PS7.
         red_e = bgri["red_edge"]

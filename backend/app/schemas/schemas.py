@@ -209,6 +209,13 @@ class ClusterElbowRequest(BaseModel):
 
     project_id: int
     pipeline_variant: str = "s2"
+    selected_dates: list[str] | None = Field(
+        default=None,
+        description=(
+            "Fechas ISO (YYYY-MM-DD) opcionales para filtrar bandas en stacks temporales "
+            "(p. ej. s1indices/). Si se omite, se usan todas las bandas."
+        ),
+    )
     k_min: int = 1
     k_max: int = 10
     max_samples: int = 100_000
@@ -220,6 +227,13 @@ class ClusterGmmRequest(BaseModel):
 
     project_id: int
     pipeline_variant: str = "s2"
+    selected_dates: list[str] | None = Field(
+        default=None,
+        description=(
+            "Fechas ISO (YYYY-MM-DD) opcionales para filtrar bandas en stacks temporales "
+            "(p. ej. s1indices/). Si se omite, se usan todas las bandas."
+        ),
+    )
     k_by_key: dict[str, int]
     max_samples: int = 100_000
     random_state: int = 42
@@ -231,3 +245,10 @@ class ClusterGmmRequest(BaseModel):
             if int(k) < 1:
                 raise ValueError(f"K debe ser >= 1 ({key}={k})")
         return v
+
+
+class PsSpatiotemporalClusterRequest(BaseModel):
+    """Parámetros KMeans; el conjunto de índices lo fija el query ``preset`` (smart1, smart2 o smart3)."""
+
+    n_clusters: int = Field(default=4, ge=2, le=32)
+    random_state: int = 42

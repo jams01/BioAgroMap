@@ -17,6 +17,7 @@ import {
 } from "./utils/geo";
 import Sidebar from "./components/Sidebar";
 import MapView from "./components/MapView";
+import AdvancedDashboard from "./components/dashboard/AdvancedDashboard";
 import { INDEX_CATALOG, INDEX_CATALOG_PS } from "./components/PreprocessPanel";
 
 const INDEX_IDS_S2 = new Set(
@@ -74,6 +75,9 @@ export default function App() {
   const [clusterGmmResults, setClusterGmmResults] = useState(null);
   const [clusterElbowResultsPs, setClusterElbowResultsPs] = useState(null);
   const [clusterGmmResultsPs, setClusterGmmResultsPs] = useState(null);
+  const [clusterElbowResultsS1, setClusterElbowResultsS1] = useState(null);
+  const [clusterGmmResultsS1, setClusterGmmResultsS1] = useState(null);
+  const [dashboardOpen, setDashboardOpen] = useState(false);
 
   useEffect(() => {
     setS2Download(null);
@@ -82,9 +86,12 @@ export default function App() {
     setClusterGmmResults(null);
     setClusterElbowResultsPs(null);
     setClusterGmmResultsPs(null);
+    setClusterElbowResultsS1(null);
+    setClusterGmmResultsS1(null);
     setRecorteLayerId("");
     setRecorteKind("");
     setPsExtractTaskId("");
+    setDashboardOpen(false);
   }, [projectId]);
 
   useEffect(() => {
@@ -1130,14 +1137,18 @@ export default function App() {
     }
   }
 
-  async function runClusterElbow(pipelineVariant = "s2") {
+  async function runClusterElbow(pipelineVariant = "s2", selectedDates = []) {
     if (!token || !projectId) {
       setMessage("Error: define proyecto.");
       return;
     }
-    const pv = pipelineVariant === "ps" ? "ps" : "s2";
+    const pv = pipelineVariant === "ps" ? "ps" : pipelineVariant === "s1" ? "s1" : "s2";
+    const pickedDates = Array.isArray(selectedDates)
+      ? [...new Set(selectedDates.map((d) => String(d).slice(0, 10)).filter(Boolean))]
+      : [];
     setClusterElbowLoading(true);
     if (pv === "ps") setClusterGmmResultsPs(null);
+    else if (pv === "s1") setClusterGmmResultsS1(null);
     else setClusterGmmResults(null);
     setMessage("");
     try {
@@ -1145,12 +1156,14 @@ export default function App() {
       const res = await api.post("/cluster-analysis/elbow", {
         project_id: Number(projectId),
         pipeline_variant: pv,
+        selected_dates: pickedDates.length ? pickedDates : undefined,
         k_min: 1,
         k_max: 10,
         max_samples: 100_000,
         random_state: 42,
       });
       if (pv === "ps") setClusterElbowResultsPs(res.data);
+      else if (pv === "s1") setClusterElbowResultsS1(res.data);
       else setClusterElbowResults(res.data);
       const n = res.data.datasets?.length ?? 0;
       setMessage(
@@ -1165,12 +1178,15 @@ export default function App() {
     }
   }
 
-  async function runClusterGmm(kByKey, pipelineVariant = "s2") {
+  async function runClusterGmm(kByKey, pipelineVariant = "s2", selectedDates = []) {
     if (!token || !projectId) {
       setMessage("Error: define proyecto.");
       return;
     }
-    const pv = pipelineVariant === "ps" ? "ps" : "s2";
+    const pv = pipelineVariant === "ps" ? "ps" : pipelineVariant === "s1" ? "s1" : "s2";
+    const pickedDates = Array.isArray(selectedDates)
+      ? [...new Set(selectedDates.map((d) => String(d).slice(0, 10)).filter(Boolean))]
+      : [];
     setClusterGmmLoading(true);
     setMessage("");
     try {
@@ -1178,11 +1194,13 @@ export default function App() {
       const res = await api.post("/cluster-analysis/gmm", {
         project_id: Number(projectId),
         pipeline_variant: pv,
+        selected_dates: pickedDates.length ? pickedDates : undefined,
         k_by_key: kByKey,
         max_samples: 100_000,
         random_state: 42,
       });
       if (pv === "ps") setClusterGmmResultsPs(res.data);
+      else if (pv === "s1") setClusterGmmResultsS1(res.data);
       else setClusterGmmResults(res.data);
       setMessage(`GMM terminado. Salidas en ${res.data.output_dir}`);
     } catch (error) {
@@ -1195,7 +1213,7 @@ export default function App() {
   /** Resultados GMM ya guardados en ``cluster_gmm/`` o ``ClusterPS/`` (p. ej. otra sesión o tras reiniciar). */
   async function loadPersistedClusterGmm(pipelineVariant = "s2") {
     if (!token || !projectId) return null;
-    const pv = pipelineVariant === "ps" ? "ps" : "s2";
+    const pv = pipelineVariant === "ps" ? "ps" : pipelineVariant === "s1" ? "s1" : "s2";
     setAuthToken(token);
     const res = await api.get(
       `/cluster-analysis/gmm-results/${projectId}?pipeline_variant=${encodeURIComponent(pv)}`
@@ -1203,9 +1221,11 @@ export default function App() {
     const data = res.data;
     if (data?.results?.length) {
       if (pv === "ps") setClusterGmmResultsPs(data);
+      else if (pv === "s1") setClusterGmmResultsS1(data);
       else setClusterGmmResults(data);
     } else {
       if (pv === "ps") setClusterGmmResultsPs(null);
+      else if (pv === "s1") setClusterGmmResultsS1(null);
       else setClusterGmmResults(null);
     }
     return data;
@@ -1263,6 +1283,7 @@ export default function App() {
         onToggleVisibility={toggleLayerVisibility}
         onZoomToLayer={zoomToLayer}
         onHideLayer={(lid) => setLayerVisibility(lid, false)}
+        onOpenDashboard={() => setDashboardOpen(true)}
         onUploadLote={uploadLote}
         onUploadRaster={uploadRaster}
         onRunAI={runAI}
@@ -1284,12 +1305,17 @@ export default function App() {
         clusterGmmResults={clusterGmmResults}
         clusterElbowResultsPs={clusterElbowResultsPs}
         clusterGmmResultsPs={clusterGmmResultsPs}
+        clusterElbowResultsS1={clusterElbowResultsS1}
+        clusterGmmResultsS1={clusterGmmResultsS1}
         onClusterElbow={() => runClusterElbow("s2")}
         onClusterGmm={(k) => runClusterGmm(k, "s2")}
         onClusterElbowPs={() => runClusterElbow("ps")}
         onClusterGmmPs={(k) => runClusterGmm(k, "ps")}
+        onClusterElbowS1={(dates) => runClusterElbow("s1", dates)}
+        onClusterGmmS1={(k, dates) => runClusterGmm(k, "s1", dates)}
         onLoadPersistedClusterGmm={() => loadPersistedClusterGmm("s2")}
         onLoadPersistedClusterGmmPs={() => loadPersistedClusterGmm("ps")}
+        onLoadPersistedClusterGmmS1={() => loadPersistedClusterGmm("s1")}
         onPsPlanetExtract={runPsPlanetExtract}
         s2Download={s2Download}
         s1Download={s1Download}
@@ -1302,6 +1328,12 @@ export default function App() {
         token={token}
         baseStyle={baseStyle}
         setBaseStyle={setBaseStyle}
+      />
+      <AdvancedDashboard
+        open={dashboardOpen}
+        onClose={() => setDashboardOpen(false)}
+        token={token}
+        projectId={projectId}
       />
     </div>
   );

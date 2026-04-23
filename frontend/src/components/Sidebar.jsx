@@ -52,6 +52,7 @@ export default function Sidebar({
   onToggleVisibility,
   onZoomToLayer,
   onHideLayer,
+  onOpenDashboard,
   onUploadLote,
   onUploadRaster,
   onRunAI,
@@ -72,14 +73,19 @@ export default function Sidebar({
   onClusterGmm,
   onClusterElbowPs,
   onClusterGmmPs,
+  onClusterElbowS1,
+  onClusterGmmS1,
   onLoadPersistedClusterGmm,
   onLoadPersistedClusterGmmPs,
+  onLoadPersistedClusterGmmS1,
   onPsPlanetExtract,
   s2Download,
   s1Download,
   visualIndexGalleryKickPs = 0,
   clusterElbowResultsPs,
   clusterGmmResultsPs,
+  clusterElbowResultsS1,
+  clusterGmmResultsS1,
 }) {
   const [panelOpen, setPanelOpen] = useState(true);
   const [layersPanelOpen, setLayersPanelOpen] = useState(false);
@@ -188,6 +194,8 @@ export default function Sidebar({
           onToggleVisibility={onToggleVisibility}
           onZoomToLayer={onZoomToLayer}
           onHideLayer={onHideLayer}
+          onOpenDashboard={onOpenDashboard}
+          dashboardDisabled={!token || !projectId}
         />
       ) : null}
 
@@ -237,6 +245,13 @@ export default function Sidebar({
           s1SarStacksBusy={s1SarStacksBusy}
           onS1GrdRecortes={onS1GrdRecortes}
           onS1SarIndexStacks={onS1SarIndexStacks}
+          clusterElbowLoading={clusterElbowLoading}
+          clusterGmmLoading={clusterGmmLoading}
+          clusterElbowResults={clusterElbowResultsS1}
+          clusterGmmResults={clusterGmmResultsS1}
+          onClusterElbow={onClusterElbowS1}
+          onClusterGmm={onClusterGmmS1}
+          onLoadPersistedClusterGmm={onLoadPersistedClusterGmmS1}
         />
       ) : null}
 

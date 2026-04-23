@@ -643,6 +643,21 @@ body {
   font-size: 13px;
 }
 
+.layers-dashboard-btn {
+  padding: 4px 8px !important;
+  font-size: 11px !important;
+  border: 1px solid #1f4cc8;
+  background: #eef3ff;
+  color: #1f4cc8;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.layers-dashboard-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .layers-list {
   list-style: none;
   margin: 0;
@@ -2166,6 +2181,12 @@ body {
   border: 1px solid #e2e8f5;
 }
 
+.vts-chart-legend-icon-wrap {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 4px;
+}
+
 .vts-chart-block {
   border: 1px solid #e8e8e8;
   border-radius: 8px;
@@ -2174,6 +2195,10 @@ body {
 }
 
 .vts-chart-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 8px;
   margin-bottom: 8px;
 }
 
@@ -2212,6 +2237,23 @@ body {
   color: #555;
 }
 
+.vts-info-icon {
+  width: 18px;
+  height: 18px;
+  border: 1px solid #cbd5e1;
+  border-radius: 999px;
+  background: #f8fafc;
+  color: #475569;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: help;
+  padding: 0;
+}
+
 .vts-chart-svg {
   display: block;
   width: 100%;
@@ -2243,4 +2285,759 @@ body {
 .vts-error-msg {
   margin-top: 6px;
   color: #b00020;
+}
+
+/* Advanced dashboard */
+.adv-dashboard-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 4100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px;
+}
+
+.adv-dashboard-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+}
+
+.adv-dashboard-window {
+  position: relative;
+  z-index: 1;
+  width: min(1900px, 99vw);
+  height: min(96vh, 1400px);
+  background: #fff;
+  border-radius: 12px;
+  box-shadow: 0 10px 36px rgba(0, 0, 0, 0.3);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px 14px;
+  overflow: hidden;
+  min-height: 0;
+}
+
+.adv-dashboard-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.adv-dashboard-header h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.adv-dashboard-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.adv-dashboard-header-actions button {
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px solid #cfd8ea;
+  background: #f7f9ff;
+  cursor: pointer;
+}
+
+.adv-close-btn {
+  font-size: 22px;
+  line-height: 1;
+}
+
+.adv-dashboard-status,
+.adv-dashboard-error {
+  margin: 0;
+  font-size: 12px;
+}
+
+.adv-dashboard-error {
+  color: #b00020;
+}
+
+.adv-main-split {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
+  align-items: stretch;
+}
+
+.adv-timelapse-column {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  border: 1px solid #e6e9f2;
+  border-radius: 10px;
+  padding: 8px 10px 10px;
+  background: #fafbfd;
+}
+
+/* 75% alto: pestañas + toolbar + visor. 25%: panel geofísica estático. */
+.adv-timelapse-main {
+  flex: 3 1 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow: hidden;
+}
+
+.adv-timelapse-geofisica {
+  flex: 1 1 0;
+  min-height: 0;
+  margin-top: 8px;
+  border-radius: 8px;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px 10px;
+  overflow: hidden;
+}
+
+.adv-timelapse-geofisica-title {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 700;
+  color: #1a2d50;
+  letter-spacing: 0.01em;
+  flex: 0 0 auto;
+  line-height: 1.25;
+}
+
+.adv-timelapse-geofisica-frame {
+  flex: 1 1 0;
+  min-height: 0;
+  border-radius: 6px;
+  background: #f4f6fb;
+  border: 1px solid #e6e9f2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.adv-timelapse-geofisica-frame img {
+  max-width: 100%;
+  max-height: 100%;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  display: block;
+}
+
+.adv-sensor-tabs {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.adv-sensor-tab {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid #d8deed;
+  background: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  color: #3d4f6f;
+  cursor: pointer;
+}
+
+.adv-sensor-tab:hover {
+  border-color: #9db4e8;
+  color: #1a2d50;
+}
+
+.adv-sensor-tab--active {
+  border-color: #2d6cdf;
+  background: #eef4ff;
+  color: #153a7a;
+  box-shadow: 0 1px 0 rgba(45, 108, 223, 0.12);
+}
+
+.adv-timelapse-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+  align-items: flex-end;
+}
+
+.adv-timelapse-toolbar-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+  color: #4a5568;
+  min-width: 0;
+  flex: 1;
+}
+
+.adv-timelapse-toolbar-field select {
+  max-width: 100%;
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid #cfd8ea;
+}
+
+.adv-timelapse-toolbar-label {
+  font-weight: 600;
+  color: #5c6578;
+}
+
+.adv-timelapse-toolbar-check {
+  margin-bottom: 2px;
+  font-size: 11px;
+  color: #4a5568;
+}
+
+.adv-timelapse-main .adv-viewer {
+  flex: 1 1 0;
+  min-height: 0;
+  background: #fff;
+  /*
+   * No usar height:100% aquí: con flex + grid, la fila 1fr del área de imágenes puede
+   * quedar en altura 0 y desaparecen índice/RGB. Forzar mínimo y dejar que flex reparta.
+   */
+  grid-template-rows: auto auto minmax(240px, 1fr) auto;
+  padding: 4px 6px;
+  gap: 4px;
+}
+
+.adv-series-column {
+  min-height: 0;
+  border: 1px solid #e6e9f2;
+  border-radius: 10px;
+  padding: 10px 12px;
+  overflow: hidden;
+  background: #fafbfd;
+  display: flex;
+  flex-direction: column;
+}
+
+.adv-series-column-inner {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.adv-series-primary {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.adv-smart-clusters-panel {
+  flex: 0 0 25%;
+  min-height: 120px;
+  max-height: min(34vh, 400px);
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.adv-smart-clusters-grid {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  align-items: stretch;
+}
+
+.adv-smart-cluster-cell {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.adv-smart-cluster-heading {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 700;
+  color: #153a7a;
+  line-height: 1.2;
+  flex: 0 0 auto;
+}
+
+.adv-smart-cluster-frame {
+  flex: 1 1 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid #2d6cdf;
+  border-radius: 8px;
+  background: #fafbfd;
+  overflow: hidden;
+  padding: 4px;
+}
+
+.adv-smart-cluster-map {
+  flex: 1 1 0;
+  min-height: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #fff;
+  border-radius: 4px;
+}
+
+.adv-smart-cluster-msg {
+  margin: 0;
+  font-size: 10px;
+  line-height: 1.35;
+  color: #5c6578;
+  flex: 0 0 auto;
+}
+
+.adv-smart-cluster-msg--err {
+  color: #b00020;
+}
+
+.adv-top-grid {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  overflow: auto;
+}
+
+.adv-viewer {
+  border: 1px solid #e0e4ef;
+  border-radius: 10px;
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  gap: 6px;
+  padding: 8px;
+  min-height: 0;
+}
+
+.adv-viewer-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 12px;
+  gap: 8px;
+}
+
+.adv-viewer-head--compact {
+  justify-content: flex-end;
+}
+
+.adv-date-chip {
+  font-size: 11px;
+  background: #eef3ff;
+  border: 1px solid #d7e2ff;
+  border-radius: 999px;
+  padding: 2px 8px;
+}
+
+.adv-viewer-controls {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.adv-viewer-controls select {
+  flex: 1;
+  min-width: 0;
+}
+
+.adv-viewer-controls button {
+  padding: 4px 8px;
+  font-size: 11px;
+}
+
+.adv-viewer-controls-date {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.adv-viewer-media {
+  border: 1px solid #ecedf3;
+  background: #f7f8fb;
+  border-radius: 8px;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.adv-viewer-media img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.adv-viewer > .adv-viewer-media-dual {
+  align-self: stretch;
+  min-height: 0;
+  min-width: 0;
+  /* Ocupar todo el alto de la fila grid del visor (evita fila 1fr colapsada) */
+  height: 100%;
+  max-height: 100%;
+}
+
+.adv-timelapse-main .adv-viewer > .adv-viewer-media {
+  min-height: 0;
+  height: 100%;
+  max-height: 100%;
+}
+
+.adv-viewer-media-dual {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  gap: 6px;
+  min-height: 0;
+  min-width: 0;
+  align-items: stretch;
+  box-sizing: border-box;
+}
+
+.adv-viewer-media-dual > .adv-viewer-pane {
+  min-height: 0;
+  align-self: stretch;
+}
+
+.adv-viewer-pane-date-overlay {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 6;
+  pointer-events: none;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+.adv-viewer-pane--dual .adv-viewer-pane-label {
+  top: auto;
+  bottom: 8px;
+  left: 8px;
+}
+
+.adv-date-chip--over-pane {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.adv-viewer-date-above-single {
+  display: flex;
+  justify-content: center;
+  padding-bottom: 6px;
+  flex-shrink: 0;
+}
+
+.adv-viewer-pane {
+  position: relative;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid #ecedf3;
+  background: #f7f8fb;
+  min-height: 120px;
+}
+
+.adv-viewer-pane--index.adv-viewer-media--interactive {
+  cursor: crosshair;
+}
+
+.adv-viewer-pane-label {
+  position: absolute;
+  top: 6px;
+  left: 8px;
+  z-index: 4;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: #475569;
+  text-shadow: 0 0 6px #fff, 0 0 4px #fff;
+  pointer-events: none;
+}
+
+.adv-viewer-rgb-img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.adv-viewer-media--interactive {
+  position: relative;
+  cursor: crosshair;
+  min-height: 120px;
+}
+
+.adv-viewer-pane > .adv-viewer-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 10px;
+  text-align: center;
+  z-index: 1;
+  background: rgba(247, 248, 251, 0.92);
+}
+
+.adv-viewer-stack-img,
+.adv-viewer-stack-cluster {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+/* Después de la regla anterior: en dual, cubrir el panel (evita bandas grises como en la captura) */
+.adv-viewer-media-dual .adv-viewer-stack-img,
+.adv-viewer-media-dual .adv-viewer-stack-cluster,
+.adv-viewer-media-dual .adv-viewer-rgb-img {
+  object-fit: cover;
+  object-position: center;
+}
+
+.adv-viewer-stack-cluster {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+.adv-viewer-media--interactive .adv-viewer-empty {
+  position: relative;
+  z-index: 0;
+}
+
+.adv-viewer-roi-btn {
+  white-space: nowrap;
+}
+
+.adv-viewer-empty {
+  font-size: 12px;
+  color: #666;
+}
+
+.adv-viewer-timeline {
+  display: grid;
+  gap: 4px;
+}
+
+.adv-viewer-timeline input[type="range"] {
+  width: 100%;
+}
+
+.adv-viewer-foot {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+}
+
+.adv-viewer-foot label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.adv-gap-list,
+.adv-nearest-hint,
+.adv-nearest-global {
+  font-size: 11px;
+  color: #4d5f88;
+}
+
+.adv-mid-section {
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(120px, 1fr) auto auto;
+  gap: 6px;
+  border: 1px solid #e0e4ef;
+  border-radius: 10px;
+  padding: 8px;
+}
+
+.adv-mid-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.adv-mid-toolbar label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.adv-inline-check {
+  white-space: nowrap;
+}
+
+.adv-btn-active {
+  background: #e8f0ff !important;
+  border-color: #2d6cdf !important;
+}
+
+.adv-map-frame {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid #ebedf5;
+  border-radius: 8px;
+  background: #f4f6fb;
+  min-height: 0;
+  cursor: crosshair;
+}
+
+.adv-map-raster,
+.adv-map-cluster {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.adv-map-cluster {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+.adv-map-empty {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  color: #666;
+}
+
+.adv-roi-rect {
+  position: absolute;
+  border: 2px dashed #1f4cc8;
+  background: rgba(45, 108, 223, 0.15);
+  z-index: 2;
+  pointer-events: none;
+}
+
+.adv-mid-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  font-size: 11px;
+  color: #444;
+}
+
+.adv-bottom-grid {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  overflow: auto;
+}
+
+.adv-series-card {
+  border: 1px solid #e0e4ef;
+  border-radius: 10px;
+  padding: 8px;
+  overflow: auto;
+}
+
+.adv-series-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 11px;
+}
+
+.adv-series-card-head h3 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.adv-series-empty {
+  font-size: 12px;
+  color: #666;
+}
+
+.adv-climate-panel {
+  margin-top: 8px;
+  border-top: 1px solid #edf0f7;
+  padding-top: 6px;
+}
+
+.adv-climate-head {
+  font-size: 11px;
+  color: #555;
+  margin-bottom: 4px;
+}
+
+.adv-climate-svg {
+  width: 100%;
+  height: 150px;
+  border: 1px solid #edf0f7;
+  border-radius: 6px;
+  background: #fff;
+}
+
+.adv-climate-empty {
+  margin: 0;
+  font-size: 11px;
+  color: #666;
+}
+
+.adv-climate-toggles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  font-size: 12px;
+  border-top: 1px solid #edf0f7;
+  padding-top: 8px;
+}
+
+.adv-climate-toggles label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.adv-climate-panel--inline {
+  margin-top: 0;
+  border-top: none;
+  padding-top: 0;
+  /* Alinear con el área interna de .vts-chart-block (padding lateral 12px). */
+  padding-left: 12px;
+  padding-right: 12px;
+}
+
+.adv-climate-toggles--compact {
+  border-top: none;
+  padding-top: 0;
+  gap: 8px 12px;
+  font-size: 11px;
+}
+
+.vts-charts-wrap--compact {
+  gap: 4px;
 }
