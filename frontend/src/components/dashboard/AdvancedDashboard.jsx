@@ -136,6 +136,58 @@ function safeRevokePreviewUrl(url) {
   URL.revokeObjectURL(url);
 }
 
+async function computeImageMeanGray(src) {
+  if (!src) return null;
+  const img = new Image();
+  img.decoding = "async";
+  img.crossOrigin = "anonymous";
+  img.src = src;
+  await img.decode();
+  const canvas = document.createElement("canvas");
+  canvas.width = img.naturalWidth || img.width || 1;
+  canvas.height = img.naturalHeight || img.height || 1;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  if (!ctx) return null;
+  ctx.drawImage(img, 0, 0);
+  const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  if (!data?.length) return null;
+  let sum = 0;
+  let count = 0;
+  for (let i = 0; i < data.length; i += 4) {
+    const alpha = data[i + 3];
+    if (alpha === 0) continue;
+    const gray = (data[i] + data[i + 1] + data[i + 2]) / 3;
+    sum += gray;
+    count += 1;
+  }
+  if (count === 0) return null;
+  return sum / count;
+}
+
+function computeSampleAllocation(snc, f1, f2, f3) {
+  const totalSamples = Math.max(1, Number(snc) || 1);
+  const values = [f1, f2, f3].map((v) => Math.max(0, Number(v) || 0));
+  const den = values.reduce((acc, v) => acc + v, 0);
+  if (den <= 0) {
+    const base = Math.floor(totalSamples / 3);
+    const rem = totalSamples - base * 3;
+    return [base + (rem > 0 ? 1 : 0), base + (rem > 1 ? 1 : 0), base];
+  }
+  const raw = values.map((v) => (v / den) * totalSamples);
+  const alloc = raw.map((v) => Math.floor(v));
+  let remain = totalSamples - alloc.reduce((acc, v) => acc + v, 0);
+  const order = raw
+    .map((v, i) => ({ i, frac: v - Math.floor(v) }))
+    .sort((a, b) => b.frac - a.frac);
+  let k = 0;
+  while (remain > 0) {
+    alloc[order[k % order.length].i] += 1;
+    remain -= 1;
+    k += 1;
+  }
+  return alloc;
+}
+
 export default function AdvancedDashboard({ open, onClose, token, projectId }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -155,7 +207,6 @@ export default function AdvancedDashboard({ open, onClose, token, projectId }) {
   const [pointSelection, setPointSelection] = useState(null);
   const [roiSelection, setRoiSelection] = useState(null);
   const [roiMode, setRoiMode] = useState(false);
-  const [dragStart, setDragStart] = useState(null);
   const [seriesBySensor, setSeriesBySensor] = useState({ s1: null, s2: null, ps: null });
   const [seriesLoading, setSeriesLoading] = useState(false);
   const [climateBySensor, setClimateBySensor] = useState({ s1: [], s2: [], ps: [] });
@@ -175,11 +226,27 @@ export default function AdvancedDashboard({ open, onClose, token, projectId }) {
   const [psStCluster3Preview, setPsStCluster3Preview] = useState("");
   const [psStCluster3Busy, setPsStCluster3Busy] = useState(false);
   const [psStCluster3Error, setPsStCluster3Error] = useState("");
+  const [soilPlusOpen, setSoilPlusOpen] = useState(false);
+  const [soilPlusBusy, setSoilPlusBusy] = useState(false);
+  const [soilPlusError, setSoilPlusError] = useState("");
+  const [soilSampleCount, setSoilSampleCount] = useState(657);
+  const [soilWindowSize, setSoilWindowSize] = useState(13);
+  const [soilClusterCount, setSoilClusterCount] = useState(4);
+  const [soilVars, setSoilVars] = useState({ f1: null, f2: null, f3: null });
+  const [soilDemInfo, setSoilDemInfo] = useState(null);
+  const [soilDemPreview, setSoilDemPreview] = useState("");
+  const [soilCvPreview, setSoilCvPreview] = useState("");
+  const [soilClusterPreview, setSoilClusterPreview] = useState("");
+  const [soilElbow, setSoilElbow] = useState(null);
+  const [soilClusterZoom, setSoilClusterZoom] = useState(1);
+  const [soilClusterPan, setSoilClusterPan] = useState({ x: 0, y: 0 });
+  const [soilClusterDragging, setSoilClusterDragging] = useState(false);
 
   const previewCacheRef = useRef(new Map());
   const seriesCacheRef = useRef(new Map());
   const recortesCacheRef = useRef({ s2: null, ps: null });
   const loadedProjectRef = useRef(null);
+  const soilDragRef = useRef({ dragging: false, startX: 0, startY: 0, panX: 0, panY: 0 });
   const effectiveToken = token || loadStoredAuth().access || "";
 
   const frameFor = (sensor) => {
@@ -555,6 +622,104 @@ export default function AdvancedDashboard({ open, onClose, token, projectId }) {
     () => JSON.stringify({ p: pointSelection, r: roiSelection }),
     [pointSelection, roiSelection]
   );
+  const soilSampleAllocation = useMemo(
+    () => computeSampleAllocation(soilSampleCount, soilVars.f1, soilVars.f2, soilVars.f3),
+    [soilSampleCount, soilVars]
+  );
+  const soilBars = useMemo(
+    () => [
+      { key: "f1", label: "f1: media PlanetScope banda 8", value: soilVars.f1 },
+      { key: "f2", label: "f2: cluster Smart 1", value: soilVars.f2 },
+      { key: "f3", label: "f3: cluster Smart 3", value: soilVars.f3 },
+    ],
+    [soilVars]
+  );
+
+  const runSoilPlus = async () => {
+    if (!projectId) return;
+    setSoilPlusBusy(true);
+    setSoilPlusError("");
+    try {
+      if (effectiveToken) setAuthToken(effectiveToken);
+      const base = API_URL.replace(/\/$/, "");
+      const demPreviewUrl = `${base}/preprocess/soilplus-dem-preview/${projectId}`;
+      const cvPreviewUrl = `${base}/preprocess/soilplus-cv-preview/${projectId}?window_size=${encodeURIComponent(
+        String(soilWindowSize)
+      )}`;
+      const clusterPreviewUrl = `${base}/preprocess/soilplus-cluster-preview/${projectId}?n_clusters=${encodeURIComponent(
+        String(soilClusterCount)
+      )}`;
+      const [f1Resp, demResp, elbowResp, demPng, cvPng, clusterPng, f2, f3] = await Promise.all([
+        api.get(`/preprocess/ps-soilplus-f1/${projectId}`),
+        api.get(`/preprocess/soilplus-dem-input/${projectId}`, {
+          params: { window_size: soilWindowSize },
+        }),
+        api.get(`/preprocess/soilplus-elbow/${projectId}`, {
+          params: { k_min: 2, k_max: Math.max(10, soilClusterCount + 2) },
+        }),
+        fetchPreviewObjectUrl(demPreviewUrl, effectiveToken),
+        fetchPreviewObjectUrl(cvPreviewUrl, effectiveToken),
+        fetchPreviewObjectUrl(clusterPreviewUrl, effectiveToken),
+        computeImageMeanGray(psStCluster1Preview),
+        computeImageMeanGray(psStCluster3Preview),
+      ]);
+      setSoilVars({
+        f1: Number(f1Resp?.data?.f1_band8_mean ?? 0),
+        f2,
+        f3,
+      });
+      setSoilDemInfo(demResp?.data || null);
+      setSoilElbow(elbowResp?.data || null);
+      setSoilDemPreview(demPng || "");
+      setSoilCvPreview(cvPng || "");
+      setSoilClusterPreview(clusterPng || "");
+      setSoilClusterZoom(1);
+      setSoilClusterPan({ x: 0, y: 0 });
+    } catch (e) {
+      setSoilPlusError(formatApiErrorDetail(e));
+    } finally {
+      setSoilPlusBusy(false);
+    }
+  };
+
+  const handleSoilClusterWheel = (e) => {
+    if (!e.ctrlKey) return;
+    e.preventDefault();
+    const delta = e.deltaY < 0 ? 0.1 : -0.1;
+    setSoilClusterZoom((prev) => {
+      const next = Math.max(1, Math.min(6, Number((prev + delta).toFixed(2))));
+      if (next === 1) setSoilClusterPan({ x: 0, y: 0 });
+      return next;
+    });
+  };
+
+  const handleSoilClusterMouseDown = (e) => {
+    if (!soilClusterPreview) return;
+    soilDragRef.current = {
+      dragging: true,
+      startX: e.clientX,
+      startY: e.clientY,
+      panX: soilClusterPan.x,
+      panY: soilClusterPan.y,
+    };
+    setSoilClusterDragging(true);
+  };
+
+  const handleSoilClusterMouseMove = (e) => {
+    if (!soilDragRef.current.dragging) return;
+    const dx = e.clientX - soilDragRef.current.startX;
+    const dy = e.clientY - soilDragRef.current.startY;
+    setSoilClusterPan({
+      x: soilDragRef.current.panX + dx,
+      y: soilDragRef.current.panY + dy,
+    });
+  };
+
+  const handleSoilClusterMouseUp = () => {
+    if (!soilDragRef.current.dragging) return;
+    soilDragRef.current.dragging = false;
+    setSoilClusterDragging(false);
+  };
 
   async function ensureRecortes(sensor) {
     if (sensor !== "s2" && sensor !== "ps") return [];
@@ -567,10 +732,15 @@ export default function AdvancedDashboard({ open, onClose, token, projectId }) {
     return paths;
   }
 
-  async function loadSeriesForSensor(sensor) {
+  async function loadSeriesForSensor(sensor, options = {}) {
+    const { forceRefresh = false } = options;
     const key = `${sensor}|${projectId}|${selectionKey}`;
-    if (seriesCacheRef.current.has(key)) return seriesCacheRef.current.get(key);
+    if (!forceRefresh && seriesCacheRef.current.has(key)) return seriesCacheRef.current.get(key);
     if (effectiveToken) setAuthToken(effectiveToken);
+    const roiPoints = Array.isArray(roiSelection?.polygon_points)
+      ? roiSelection.polygon_points.map((p) => ({ x: Number(p.x), y: Number(p.y) }))
+      : [];
+    const roiPayload = roiPoints.length >= 3 ? { polygon_points: roiPoints } : null;
     let data = null;
     if (sensor === "s1") {
       const frames = framesFor("s1");
@@ -579,6 +749,7 @@ export default function AdvancedDashboard({ open, onClose, token, projectId }) {
       const res = await api.post("/preprocess/s1-sar-time-series", {
         project_id: Number(projectId),
         dates,
+        roi_selection: roiPayload,
       });
       data = res.data;
     } else {
@@ -591,6 +762,7 @@ export default function AdvancedDashboard({ open, onClose, token, projectId }) {
         pipeline_variant: pv,
         max_pixel_series: 1800,
         random_seed: 42,
+        roi_selection: roiPayload,
       });
       data = res.data;
     }
@@ -598,14 +770,15 @@ export default function AdvancedDashboard({ open, onClose, token, projectId }) {
     return data;
   }
 
-  async function loadAllSeries() {
+  async function loadAllSeries(options = {}) {
+    const { forceRefresh = false } = options;
     if (!open || !projectId) return;
     setSeriesLoading(true);
     try {
       const [s1, s2, ps] = await Promise.all([
-        loadSeriesForSensor("s1"),
-        loadSeriesForSensor("s2"),
-        loadSeriesForSensor("ps"),
+        loadSeriesForSensor("s1", { forceRefresh }),
+        loadSeriesForSensor("s2", { forceRefresh }),
+        loadSeriesForSensor("ps", { forceRefresh }),
       ]);
       setSeriesBySensor({ s1, s2, ps });
 
@@ -635,40 +808,26 @@ export default function AdvancedDashboard({ open, onClose, token, projectId }) {
 
   const activeCluster = (clusterBySensor[sensorActive] || []).find((c) => c.key === selectedClusterKey[sensorActive]);
 
-  const handleMediaMouseMove = (e) => {
-    const rect = e.currentTarget.getBoundingClientRect();
-    const x = (e.clientX - rect.left) / Math.max(rect.width, 1);
-    const y = (e.clientY - rect.top) / Math.max(rect.height, 1);
-    if (roiMode && dragStart) {
-      setRoiSelection({
-        x1: Math.min(dragStart.x, x),
-        y1: Math.min(dragStart.y, y),
-        x2: Math.max(dragStart.x, x),
-        y2: Math.max(dragStart.y, y),
-      });
-    }
-  };
+  const handleMediaMouseMove = () => {};
 
-  const handleMediaMouseDown = (e) => {
-    if (!roiMode) return;
-    const rect = e.currentTarget.getBoundingClientRect();
-    setDragStart({
-      x: (e.clientX - rect.left) / Math.max(rect.width, 1),
-      y: (e.clientY - rect.top) / Math.max(rect.height, 1),
-    });
-  };
+  const handleMediaMouseDown = () => {};
 
-  const handleMediaMouseUp = () => {
-    setDragStart(null);
-  };
+  const handleMediaMouseUp = () => {};
 
   const handleMediaClick = (e) => {
-    if (roiMode) return;
     const rect = e.currentTarget.getBoundingClientRect();
-    setPointSelection({
-      x: (e.clientX - rect.left) / Math.max(rect.width, 1),
-      y: (e.clientY - rect.top) / Math.max(rect.height, 1),
-    });
+    const x = Math.min(1, Math.max(0, (e.clientX - rect.left) / Math.max(rect.width, 1)));
+    const y = Math.min(1, Math.max(0, (e.clientY - rect.top) / Math.max(rect.height, 1)));
+    if (roiMode) {
+      setRoiSelection((prev) => {
+        const current = Array.isArray(prev?.polygon_points) ? prev.polygon_points : [];
+        return {
+          polygon_points: [...current, { x, y }],
+        };
+      });
+      return;
+    }
+    setPointSelection({ x, y });
   };
 
   if (!open) return null;
@@ -681,7 +840,7 @@ export default function AdvancedDashboard({ open, onClose, token, projectId }) {
         <div className="adv-dashboard-header">
           <h2>BioAgroMap -> Dashboard multisensor Espectral-Espacio-Temporal</h2>
           <div className="adv-dashboard-header-actions">
-            <button type="button" onClick={() => void loadAllSeries()} disabled={seriesLoading || loading}>
+            <button type="button" onClick={() => void loadAllSeries({ forceRefresh: true })} disabled={seriesLoading || loading}>
               {seriesLoading ? "…" : "Actualizar series"}
             </button>
             <button type="button" className="adv-close-btn" onClick={onClose} aria-label="Cerrar">
@@ -774,6 +933,9 @@ export default function AdvancedDashboard({ open, onClose, token, projectId }) {
                 interactive
                 roiMode={roiMode}
                 onToggleRoi={() => setRoiMode((v) => !v)}
+                onClearRoi={() => {
+                  setRoiSelection(null);
+                }}
                 roiSelection={roiSelection}
                 clusterPreviewB64={activeCluster?.preview_png_base64 || null}
                 clusterVisible={clusterVisible}
@@ -784,7 +946,12 @@ export default function AdvancedDashboard({ open, onClose, token, projectId }) {
               />
             </div>
             <section className="adv-timelapse-geofisica" aria-label="Geofísica y modelado de suelo">
-              <h3 className="adv-timelapse-geofisica-title">AGRO Geofisica - Modelado del suelo agricola</h3>
+              <div className="adv-timelapse-geofisica-head">
+                <h3 className="adv-timelapse-geofisica-title">AGRO Geofisica - Modelado del suelo agricola</h3>
+                <button type="button" className="adv-soilplus-btn" onClick={() => setSoilPlusOpen(true)}>
+                  Soil+
+                </button>
+              </div>
               <div className="adv-timelapse-geofisica-frame">
                 <img
                   src={`${import.meta.env.BASE_URL}dashboard-geofisica-modelado-suelo.png`}
@@ -896,6 +1063,241 @@ export default function AdvancedDashboard({ open, onClose, token, projectId }) {
           </div>
         </div>
       </div>
+      {soilPlusOpen ? (
+        <div className="adv-soilplus-overlay" role="dialog" aria-modal="true" aria-label="Soil Plus">
+          <div className="adv-soilplus-backdrop" onClick={() => setSoilPlusOpen(false)} />
+          <div className="adv-soilplus-window">
+            <div className="adv-soilplus-header">
+              <h3>Soil+ | Flujo Agrogeofisica (Hoya_RS adaptado)</h3>
+              <button type="button" className="adv-close-btn" onClick={() => setSoilPlusOpen(false)} aria-label="Cerrar">
+                ×
+              </button>
+            </div>
+            <p className="adv-soilplus-note">
+              f1: media PlanetScope banda 8. f2: cluster smart 1. f3: cluster smart 3. SNC: # muestra.
+            </p>
+            <div className="adv-soilplus-controls">
+              <button type="button" className="adv-soilplus-run-btn" onClick={() => void runSoilPlus()} disabled={soilPlusBusy}>
+                {soilPlusBusy ? "Ejecutando..." : "Ejecutar"}
+              </button>
+              <label>
+                # muestra (SNC)
+                <input
+                  type="number"
+                  min={1}
+                  step={1}
+                  value={soilSampleCount}
+                  onChange={(e) => setSoilSampleCount(Math.max(1, Number(e.target.value) || 1))}
+                />
+              </label>
+              <label>
+                windowSize
+                <input
+                  type="number"
+                  min={3}
+                  max={101}
+                  step={1}
+                  value={soilWindowSize}
+                  onChange={(e) => setSoilWindowSize(Math.max(3, Number(e.target.value) || 3))}
+                />
+              </label>
+              <label>
+                Numero de cluster
+                <input
+                  type="number"
+                  min={2}
+                  max={30}
+                  step={1}
+                  value={soilClusterCount}
+                  onChange={(e) => setSoilClusterCount(Math.max(2, Number(e.target.value) || 2))}
+                />
+              </label>
+              {soilPlusBusy ? <span className="adv-soilplus-badge">Calculando…</span> : null}
+              {soilPlusError ? <span className="adv-soilplus-badge adv-soilplus-badge--err">{soilPlusError}</span> : null}
+            </div>
+            <p className="adv-soilplus-dem-path">
+              Imagen de entrada:{" "}
+              <code>
+                {soilDemInfo?.input_image_path ||
+                  `/home/deep/Documentos/BioAgroMap/data/storage/tenant_activo/project_${projectId || "?"}/dem/band_1.img`}
+              </code>
+            </p>
+            <div className="adv-soilplus-grid">
+              <section className="adv-soilplus-card">
+                <h4>DEM de entrada (band_1.img)</h4>
+                <p className="adv-soilplus-dem-meta">
+                  {soilDemInfo
+                    ? `windowSize: ${soilDemInfo.window_size} | Media: ${Number(soilDemInfo.dem_mean || 0).toFixed(3)} | Std: ${Number(
+                        soilDemInfo.dem_std || 0
+                      ).toFixed(3)} | Min: ${Number(soilDemInfo.dem_min || 0).toFixed(3)} | Max: ${Number(
+                        soilDemInfo.dem_max || 0
+                      ).toFixed(3)} | CV mean: ${Number(soilDemInfo.cv_mean || 0).toFixed(4)}`
+                    : "Pulsa Ejecutar para calcular estadisticos del DEM."}
+                </p>
+                <div className="adv-soilplus-image-frame">
+                  {soilDemPreview ? (
+                    <img src={soilDemPreview} alt="DEM band_1" className="adv-soilplus-image" />
+                  ) : (
+                    <p className="adv-soilplus-image-empty">Sin imagen. Pulsa Ejecutar.</p>
+                  )}
+                </div>
+              </section>
+              <section className="adv-soilplus-card">
+                <h4>Variables f1, f2, f3</h4>
+                <p className="adv-soilplus-dem-meta">Imagen despues de aplicar CV con windowSize={soilWindowSize}.</p>
+                <div className="adv-soilplus-image-frame">
+                  {soilCvPreview ? (
+                    <img src={soilCvPreview} alt="DEM CV" className="adv-soilplus-image" />
+                  ) : (
+                    <p className="adv-soilplus-image-empty">Sin imagen CV. Pulsa Ejecutar.</p>
+                  )}
+                </div>
+              </section>
+              <section className="adv-soilplus-card">
+                <h4>SN comp (asignacion por seccion)</h4>
+                <svg viewBox="0 0 420 230" className="adv-soilplus-svg" role="img" aria-label="Asignación SNH">
+                  {[0, 1, 2].map((i) => {
+                    const v = soilSampleAllocation[i] || 0;
+                    const h = Math.max(8, (v / Math.max(soilSampleCount, 1)) * 150);
+                    const x = 40 + i * 120;
+                    const y = 180 - h;
+                    return (
+                      <g key={`bar-${i}`}>
+                        <rect x={x} y={y} width="70" height={h} fill="#2d6cdf" rx="6" />
+                        <text x={x + 35} y={196} textAnchor="middle" fontSize="12">
+                          S{i + 1}
+                        </text>
+                        <text x={x + 35} y={Math.max(14, y - 6)} textAnchor="middle" fontSize="12">
+                          {v}
+                        </text>
+                      </g>
+                    );
+                  })}
+                </svg>
+              </section>
+              <section className="adv-soilplus-card">
+                <h4>Plot de variables (f1-f3)</h4>
+                <svg viewBox="0 0 420 230" className="adv-soilplus-svg" role="img" aria-label="Metodo del codo sobre band_1">
+                  {(() => {
+                    const ks = Array.isArray(soilElbow?.ks) ? soilElbow.ks : [];
+                    const ys = Array.isArray(soilElbow?.wcss) ? soilElbow.wcss : [];
+                    if (!ks.length || !ys.length) {
+                      return (
+                        <text x="210" y="120" textAnchor="middle" fontSize="12" fill="#64748b">
+                          Sin datos del codo. Pulsa Ejecutar.
+                        </text>
+                      );
+                    }
+                    const minK = Math.min(...ks);
+                    const maxK = Math.max(...ks);
+                    const minY = Math.min(...ys);
+                    const maxY = Math.max(...ys);
+                    const kDen = Math.max(1, maxK - minK);
+                    const yDen = Math.max(1e-9, maxY - minY);
+                    const px = (k) => 40 + ((k - minK) / kDen) * 340;
+                    const py = (y) => 190 - ((y - minY) / yDen) * 145;
+                    const points = ks.map((k, i) => `${px(k)},${py(ys[i])}`).join(" ");
+                    const selectedX = px(Math.min(maxK, Math.max(minK, soilClusterCount)));
+                    return (
+                      <>
+                        <line x1="40" y1="190" x2="380" y2="190" stroke="#94a3b8" />
+                        <line x1="40" y1="30" x2="40" y2="190" stroke="#94a3b8" />
+                        <polyline fill="none" stroke="#0ea5e9" strokeWidth="3" points={points} />
+                        <line x1={selectedX} y1="30" x2={selectedX} y2="190" stroke="#ef4444" strokeDasharray="4 4" />
+                        {ks.map((k, i) => {
+                          const x = px(k);
+                          const y = py(ys[i]);
+                          return (
+                            <g key={`elbow-${k}`}>
+                              <circle cx={x} cy={y} r="4" fill="#0ea5e9" />
+                              <text x={x} y={208} textAnchor="middle" fontSize="11">
+                                {k}
+                              </text>
+                            </g>
+                          );
+                        })}
+                        <text x="368" y="22" textAnchor="end" fontSize="11" fill="#ef4444">
+                          K={soilClusterCount}
+                        </text>
+                      </>
+                    );
+                  })()}
+                </svg>
+              </section>
+              <section className="adv-soilplus-card">
+                <h4>Salida cluster (K={soilClusterCount})</h4>
+                <div className="adv-soilplus-zoom-tools">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setSoilClusterZoom((z) => {
+                        const next = Math.max(1, Number((z - 0.25).toFixed(2)));
+                        if (next === 1) setSoilClusterPan({ x: 0, y: 0 });
+                        return next;
+                      })
+                    }
+                    disabled={!soilClusterPreview}
+                  >
+                    -
+                  </button>
+                  <input
+                    type="range"
+                    min={1}
+                    max={4}
+                    step={0.1}
+                    value={soilClusterZoom}
+                    onChange={(e) => {
+                      const next = Number(e.target.value);
+                      setSoilClusterZoom(next);
+                      if (next === 1) setSoilClusterPan({ x: 0, y: 0 });
+                    }}
+                    disabled={!soilClusterPreview}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setSoilClusterZoom((z) => Math.min(4, Number((z + 0.25).toFixed(2))))}
+                    disabled={!soilClusterPreview}
+                  >
+                    +
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSoilClusterZoom(1);
+                      setSoilClusterPan({ x: 0, y: 0 });
+                    }}
+                    disabled={!soilClusterPreview}
+                  >
+                    Reset
+                  </button>
+                  <span>{Math.round(soilClusterZoom * 100)}%</span>
+                </div>
+                <div
+                  className={`adv-soilplus-image-frame adv-soilplus-image-frame--cluster adv-soilplus-cluster-scroll${soilClusterDragging ? " is-dragging" : ""}`}
+                  onWheel={handleSoilClusterWheel}
+                  onMouseDown={handleSoilClusterMouseDown}
+                  onMouseMove={handleSoilClusterMouseMove}
+                  onMouseUp={handleSoilClusterMouseUp}
+                  onMouseLeave={handleSoilClusterMouseUp}
+                  title="Ctrl + rueda para zoom; click y arrastre para navegar"
+                >
+                  {soilClusterPreview ? (
+                    <img
+                      src={soilClusterPreview}
+                      alt="Cluster sobre DEM"
+                      className="adv-soilplus-image adv-soilplus-image--zoomable"
+                      style={{ transform: `translate(${soilClusterPan.x}px, ${soilClusterPan.y}px) scale(${soilClusterZoom})` }}
+                      draggable={false}
+                    />
+                  ) : (
+                    <p className="adv-soilplus-image-empty">Sin imagen de cluster. Pulsa Ejecutar.</p>
+                  )}
+                </div>
+              </section>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

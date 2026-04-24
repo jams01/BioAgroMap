@@ -277,12 +277,12 @@ def _normalize_index_band_01(band: np.ndarray) -> np.ndarray:
 
 def _index_scalar_to_rgb_colormap(t_01: np.ndarray, cmap_name: str = "RdYlGn") -> np.ndarray:
     """
-    t_01: (H,W) en [0,1] o NaN → RGB uint8 (H,W,3). NaN → negro.
+    t_01: (H,W) en [0,1] o NaN → RGB uint8 (H,W,3). NaN → blanco (fondo limpio en dashboard).
     Paletas típicas: RdYlGn (rojo bajo → verde alto), Spectral, turbo, jet.
     """
     finite = np.isfinite(t_01)
     if not np.any(finite):
-        return np.zeros((*t_01.shape, 3), dtype=np.uint8)
+        return np.full((*t_01.shape, 3), 255, dtype=np.uint8)
 
     tv = np.clip(np.where(finite, t_01, 0.0), 0.0, 1.0)
 
@@ -305,7 +305,7 @@ def _index_scalar_to_rgb_colormap(t_01: np.ndarray, cmap_name: str = "RdYlGn") -
         b = np.zeros_like(tv)
         rgb = np.stack([r, g, b], axis=-1).astype(np.uint8)
 
-    rgb[~finite, :] = 0
+    rgb[~finite, :] = 255
     return rgb
 
 
@@ -330,7 +330,7 @@ def _planet_true_color_stack_to_rgb_u8(stack: np.ndarray) -> np.ndarray:
     """
     s = stack.astype(np.float64)
     h, w = int(s.shape[1]), int(s.shape[2])
-    out = np.zeros((h, w, 3), dtype=np.uint8)
+    out = np.full((h, w, 3), 255, dtype=np.uint8)
     valid = np.isfinite(s).all(axis=0)
     if not np.any(valid):
         return out
@@ -389,13 +389,17 @@ def _planet_true_color_stack_to_rgb_u8(stack: np.ndarray) -> np.ndarray:
         plane = r[i]
         span = hi - lo
         if span < 1e-6:
-            y = np.where(np.isfinite(plane), 0.5, 0.0)
+            y = np.where(np.isfinite(plane), 0.5, 1.0)
         else:
             y = (plane - lo) / span
-        y = np.clip(np.where(np.isfinite(y), y, 0.0), 0.0, 1.0)
+        y = np.clip(np.where(np.isfinite(y), y, 1.0), 0.0, 1.0)
         y = np.power(y, 1.16)
         out[:, :, i] = (y * 255.0).astype(np.uint8)
 
+    # Fuera del polígono / relleno suele ser DN≈0 (finito, no NaN): el estirado los dejaba negros.
+    # Alinear con índice: fondo blanco donde no hay señal útil (misma máscara que define el histograma).
+    bg = ~content
+    out[bg, :] = 255
     return out
 
 
@@ -407,7 +411,7 @@ def _stretch_band_to_u8_sentinel_friendly(band: np.ndarray) -> np.ndarray:
     x = band.astype(np.float64)
     finite = np.isfinite(x)
     if not np.any(finite):
-        return np.zeros(x.shape, dtype=np.uint8)
+        return np.full(x.shape, 255, dtype=np.uint8)
 
     # Reflectancia típica ×10000 (BOA) o valores grandes → pasar a reflectancia ~0–1+.
     # No recortar a [0,1] antes del estirado: p. ej. NIR (DN>10000) quedaría todo en 1.0 y la RGB se ve pálida / lavada.
@@ -430,7 +434,7 @@ def _stretch_band_to_u8_sentinel_friendly(band: np.ndarray) -> np.ndarray:
     y = np.clip(y, 0.0, 1.0)
     # Ligera gamma para que el color natural no quede apagado
     y = np.power(y, 0.88)
-    y = np.where(np.isfinite(y), y, 0.0)
+    y = np.where(np.isfinite(y), y, 1.0)
     return (y * 255.0).astype(np.uint8)
 
 
@@ -600,7 +604,7 @@ def render_raster_preview_png(
     if use_planet_tc:
         rgb = _planet_true_color_stack_to_rgb_u8(arr)
     else:
-        rgb = np.zeros((arr.shape[1], arr.shape[2], 3), dtype=np.uint8)
+        rgb = np.full((arr.shape[1], arr.shape[2], 3), 255, dtype=np.uint8)
         for i in range(3):
             rgb[:, :, i] = _stretch_band_to_u8_sentinel_friendly(arr[i])
 

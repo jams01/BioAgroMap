@@ -151,6 +151,37 @@ class S2IndexStacksRequest(BaseModel):
     )
 
 
+class RoiPointNormalized(BaseModel):
+    x: float = Field(..., ge=0.0, le=1.0)
+    y: float = Field(..., ge=0.0, le=1.0)
+
+
+class RoiSelectionNormalized(BaseModel):
+    """ROI normalizado opcional en forma de rectángulo o polígono."""
+
+    x1: float | None = Field(default=None, ge=0.0, le=1.0)
+    y1: float | None = Field(default=None, ge=0.0, le=1.0)
+    x2: float | None = Field(default=None, ge=0.0, le=1.0)
+    y2: float | None = Field(default=None, ge=0.0, le=1.0)
+    polygon_points: list[RoiPointNormalized] | None = Field(default=None, min_length=3)
+
+    @model_validator(mode="after")
+    def validate_bounds(self):
+        rect_vals = (self.x1, self.y1, self.x2, self.y2)
+        rect_defined = all(v is not None for v in rect_vals)
+        if any(v is not None for v in rect_vals) and not rect_defined:
+            raise ValueError("ROI inválido: define x1,y1,x2,y2 completos para rectángulo.")
+        if rect_defined:
+            assert self.x1 is not None and self.y1 is not None and self.x2 is not None and self.y2 is not None
+            if self.x2 <= self.x1:
+                raise ValueError("ROI inválido: x2 debe ser mayor que x1.")
+            if self.y2 <= self.y1:
+                raise ValueError("ROI inválido: y2 debe ser mayor que y1.")
+        if not rect_defined and not self.polygon_points:
+            raise ValueError("ROI inválido: define rectángulo o polygon_points.")
+        return self
+
+
 class VegetationTimeSeriesRequest(BaseModel):
     """Series temporales por índice desde recortes L2A (6 bandas) o PlanetScope (8 bandas).
 
@@ -175,6 +206,10 @@ class VegetationTimeSeriesRequest(BaseModel):
         description="Máximo de píxeles para los que se devuelven series completas (todas las fechas).",
     )
     random_seed: int = Field(default=42, description="Semilla para el muestreo aleatorio de píxeles.")
+    roi_selection: RoiSelectionNormalized | None = Field(
+        default=None,
+        description="ROI opcional: rectángulo (x1,y1,x2,y2) o polígono (polygon_points) en [0,1].",
+    )
 
     @model_validator(mode="after")
     def at_least_one_scene_source(self):
@@ -202,6 +237,10 @@ class S1SarTimeSeriesRequest(BaseModel):
         description="Máximo de píxeles para los que se devuelven series completas (todas las fechas).",
     )
     random_seed: int = Field(default=42, description="Semilla para el muestreo aleatorio de píxeles.")
+    roi_selection: RoiSelectionNormalized | None = Field(
+        default=None,
+        description="ROI opcional: rectángulo (x1,y1,x2,y2) o polígono (polygon_points) en [0,1].",
+    )
 
 
 class ClusterElbowRequest(BaseModel):

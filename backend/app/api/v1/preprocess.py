@@ -1,4 +1,5 @@
 import json
+import io
 import logging
 import re
 import tempfile
@@ -11,7 +12,9 @@ from urllib.request import urlopen
 
 import numpy as np
 import rasterio
+from PIL import Image
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile
+from sklearn.cluster import KMeans
 from sqlalchemy.orm import Session
 
 from app.api.deps import tenant_from_jwt
@@ -44,6 +47,7 @@ from app.schemas.schemas import (
     CropRequest,
     DownloadRequest,
     IndicesRequest,
+    RoiSelectionNormalized,
     S1GrdRecorteRequest,
     S1SarIndexStacksRequest,
     S1SarTimeSeriesRequest,
@@ -884,6 +888,327 @@ def get_recortes_inventory(
     }
 
 
+def _load_soilplus_dem_band1(project_id: int, tenant_id: int) -> tuple[Path, np.ndarray, np.ndarray]:
+    dem_path = _tenant_storage(tenant_id, project_id, "dem") / "band_1.img"
+    if not dem_path.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail=f"No existe imagen DEM de entrada para Soil+: {dem_path}",
+        )
+    try:
+        with rasterio.open(dem_path) as src:
+            arr = src.read(1).astype(np.float64)
+            nd = src.nodatavals[0] if src.nodatavals else None
+            if nd is not None and np.isfinite(nd):
+                arr = np.where(arr == float(nd), np.nan, arr)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"No se pudo leer DEM de entrada: {exc}") from exc
+    arr = np.where(np.isfinite(arr), arr, np.nan)
+    arr = np.where(arr < 0, 0.0, arr)
+    mask = np.isfinite(arr) & (arr > 0)
+    if int(np.count_nonzero(mask)) <= 0:
+        raise HTTPException(status_code=400, detail="DEM sin píxeles válidos (>0).")
+    return dem_path, arr, mask
+
+
+def _soilplus_box_sum(arr2d: np.ndarray, radius: int) -> np.ndarray:
+    pad = np.pad(arr2d, ((radius, radius), (radius, radius)), mode="constant", constant_values=0.0)
+    integ = np.pad(pad, ((1, 0), (1, 0)), mode="constant", constant_values=0.0).cumsum(axis=0).cumsum(axis=1)
+    k = 2 * radius + 1
+    return integ[k:, k:] - integ[:-k, k:] - integ[k:, :-k] + integ[:-k, :-k]
+
+
+def _soilplus_compute_cv(arr: np.ndarray, mask: np.ndarray, window_size: int) -> tuple[np.ndarray, np.ndarray, int]:
+    ws = int(window_size)
+    if ws % 2 == 0:
+        ws += 1
+    r = ws // 2
+    valid = np.isfinite(arr)
+    filled = np.where(valid, arr, 0.0)
+    sum_w = _soilplus_box_sum(filled, r)
+    cnt_w = _soilplus_box_sum(valid.astype(np.float64), r)
+    sumsq_w = _soilplus_box_sum(filled * filled, r)
+    mean_w = np.divide(sum_w, cnt_w, out=np.zeros_like(sum_w), where=cnt_w > 0)
+    var_w = np.divide(sumsq_w, cnt_w, out=np.zeros_like(sumsq_w), where=cnt_w > 0) - (mean_w * mean_w)
+    var_w = np.maximum(var_w, 0.0)
+    std_w = np.sqrt(var_w)
+    cv_w = np.divide(std_w, mean_w, out=np.zeros_like(std_w), where=mean_w > 1e-9)
+    cv_w = np.where(mask, cv_w, np.nan)
+    return cv_w, cv_w[mask], ws
+
+
+def _soilplus_png_from_array(arr: np.ndarray, mask: np.ndarray) -> bytes:
+    vals = arr[mask]
+    if vals.size <= 0:
+        raise HTTPException(status_code=400, detail="No hay píxeles válidos para render.")
+    lo = float(np.nanmin(vals))
+    hi = float(np.nanmax(vals))
+    den = max(hi - lo, 1e-12)
+    norm = np.clip((arr - lo) / den, 0.0, 1.0)
+    u8 = np.where(mask, (norm * 255.0).astype(np.uint8), 0)
+    rgb = np.stack([u8, u8, u8], axis=-1)
+    img = Image.fromarray(rgb, mode="RGB")
+    buf = io.BytesIO()
+    img.save(buf, format="PNG", optimize=True)
+    return buf.getvalue()
+
+
+def _soilplus_cluster_png(labels: np.ndarray, mask: np.ndarray, n_clusters: int) -> bytes:
+    palette = np.array(
+        [
+            [228, 26, 28],
+            [55, 126, 184],
+            [77, 175, 74],
+            [152, 78, 163],
+            [255, 127, 0],
+            [255, 255, 51],
+            [166, 86, 40],
+            [247, 129, 191],
+            [141, 211, 199],
+            [179, 222, 105],
+            [128, 177, 211],
+            [253, 180, 98],
+        ],
+        dtype=np.uint8,
+    )
+    rgb = np.zeros((labels.shape[0], labels.shape[1], 3), dtype=np.uint8)
+    rgb[:] = (255, 255, 255)
+    valid_labels = np.where(mask, labels, -1)
+    for k in range(int(n_clusters)):
+        color = palette[k % len(palette)]
+        rgb[valid_labels == k] = color
+    img = Image.fromarray(rgb, mode="RGB")
+    buf = io.BytesIO()
+    img.save(buf, format="PNG", optimize=True)
+    return buf.getvalue()
+
+
+@router.get("/preprocess/ps-soilplus-f1/{project_id}")
+def get_ps_soilplus_f1_exact(
+    project_id: int,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(tenant_from_jwt),
+):
+    """
+    Calcula f1 exacto para Soil+ desde PlanetScope real:
+    media global de la banda 8 en todos los GeoTIFF válidos de ``recortesPS/``.
+    """
+    project = db.query(Project).filter(Project.id == project_id, Project.tenant_id == tenant_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    rec_root = _tenant_storage(tenant_id, project_id, recortes_dir_name("ps"))
+    if not rec_root.is_dir():
+        raise HTTPException(status_code=404, detail="No existe recortesPS/ para este proyecto.")
+
+    total_sum = 0.0
+    total_count = 0
+    used_files = 0
+    skipped_non_ps_name = 0
+    skipped_not_8band = 0
+    skipped_open_error = 0
+
+    for p in sorted(rec_root.rglob("*.tif")):
+        if "_cog" in p.name.lower() or not p.is_file():
+            continue
+        if not is_planetscope_ps_recorte_filename(p.name):
+            skipped_non_ps_name += 1
+            continue
+        try:
+            with rasterio.open(p) as src:
+                if int(src.count) < 8:
+                    skipped_not_8band += 1
+                    continue
+                band8 = src.read(8).astype(np.float64)
+                nd = src.nodatavals[7] if src.nodatavals and len(src.nodatavals) >= 8 else None
+                if nd is not None and np.isfinite(nd):
+                    band8 = np.where(band8 == float(nd), np.nan, band8)
+                band8 = np.where(np.isfinite(band8), band8, np.nan)
+                valid = np.isfinite(band8)
+                n_valid = int(np.count_nonzero(valid))
+                if n_valid <= 0:
+                    continue
+                total_sum += float(np.nansum(band8))
+                total_count += n_valid
+                used_files += 1
+        except Exception:
+            skipped_open_error += 1
+            continue
+
+    if total_count <= 0:
+        raise HTTPException(
+            status_code=404,
+            detail="No se encontraron píxeles válidos de banda 8 en recortesPS/.",
+        )
+
+    return {
+        "project_id": int(project_id),
+        "f1_band8_mean": total_sum / total_count,
+        "valid_pixel_count": total_count,
+        "files_used": used_files,
+        "files_skipped": {
+            "non_ps_filename": skipped_non_ps_name,
+            "less_than_8_bands": skipped_not_8band,
+            "open_error": skipped_open_error,
+        },
+        "source_dir": "recortesPS",
+        "method": "global_mean_of_band_8_across_all_valid_pixels",
+    }
+
+
+@router.get("/preprocess/soilplus-dem-input/{project_id}")
+def get_soilplus_dem_input_stats(
+    project_id: int,
+    window_size: int = Query(13, ge=3, le=101, description="Tamaño de ventana para métrica CV local (impar recomendado)."),
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(tenant_from_jwt),
+):
+    """
+    Fuente de entrada fija para Soil+:
+    data/storage/tenant_{tenant}/project_{project}/dem/band_1.img
+    """
+    project = db.query(Project).filter(Project.id == project_id, Project.tenant_id == tenant_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    try:
+        dem_path, arr, mask = _load_soilplus_dem_band1(project_id, tenant_id)
+        n_valid = int(np.count_nonzero(mask))
+        vals = arr[mask]
+        cv_w, cv_vals, ws = _soilplus_compute_cv(arr, mask, window_size)
+        return {
+            "project_id": int(project_id),
+            "input_image_path": str(dem_path),
+            "window_size": ws,
+            "width": int(arr.shape[1]),
+            "height": int(arr.shape[0]),
+            "valid_pixel_count": n_valid,
+            "dem_mean": float(np.mean(vals)),
+            "dem_std": float(np.std(vals)),
+            "dem_min": float(np.min(vals)),
+            "dem_max": float(np.max(vals)),
+            "cv_mean": float(np.mean(cv_vals)) if cv_vals.size else 0.0,
+            "cv_var": float(np.var(cv_vals)) if cv_vals.size else 0.0,
+            "method": "band1_dem_values_cleaned_negatives_to_zero_mask_gt_zero",
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"No se pudo leer DEM de entrada: {exc}") from exc
+
+
+@router.get("/preprocess/soilplus-dem-preview/{project_id}")
+def get_soilplus_dem_preview(
+    project_id: int,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(tenant_from_jwt),
+):
+    project = db.query(Project).filter(Project.id == project_id, Project.tenant_id == tenant_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    dem_path, arr, mask = _load_soilplus_dem_band1(project_id, tenant_id)
+    _ = dem_path
+    png = _soilplus_png_from_array(arr, mask)
+    return Response(content=png, media_type="image/png")
+
+
+@router.get("/preprocess/soilplus-cv-preview/{project_id}")
+def get_soilplus_cv_preview(
+    project_id: int,
+    window_size: int = Query(13, ge=3, le=101),
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(tenant_from_jwt),
+):
+    project = db.query(Project).filter(Project.id == project_id, Project.tenant_id == tenant_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    _, arr, mask = _load_soilplus_dem_band1(project_id, tenant_id)
+    cv_w, _, _ws = _soilplus_compute_cv(arr, mask, window_size)
+    png = _soilplus_png_from_array(cv_w, mask)
+    return Response(content=png, media_type="image/png")
+
+
+@router.get("/preprocess/soilplus-elbow/{project_id}")
+def get_soilplus_elbow(
+    project_id: int,
+    k_min: int = Query(2, ge=2, le=20),
+    k_max: int = Query(10, ge=2, le=30),
+    sample_max: int = Query(20000, ge=2000, le=120000),
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(tenant_from_jwt),
+):
+    project = db.query(Project).filter(Project.id == project_id, Project.tenant_id == tenant_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if k_max < k_min:
+        raise HTTPException(status_code=400, detail="k_max debe ser >= k_min")
+    _, arr, mask = _load_soilplus_dem_band1(project_id, tenant_id)
+    x = arr[mask].reshape(-1, 1).astype(np.float64)
+    n = x.shape[0]
+    if n > sample_max:
+        rng = np.random.default_rng(42)
+        idx = rng.choice(n, size=int(sample_max), replace=False)
+        x = x[idx]
+    ks: list[int] = []
+    wcss: list[float] = []
+    for k in range(int(k_min), int(k_max) + 1):
+        km = KMeans(n_clusters=k, random_state=42, n_init=10)
+        km.fit(x)
+        ks.append(k)
+        wcss.append(float(km.inertia_))
+    # heurística simple de codo: máxima distancia a recta (primer-último punto)
+    elbow_k = ks[0]
+    if len(ks) >= 3:
+        x0, y0 = ks[0], wcss[0]
+        x1, y1 = ks[-1], wcss[-1]
+        den = ((y1 - y0) ** 2 + (x1 - x0) ** 2) ** 0.5
+        if den > 0:
+            dmax = -1.0
+            for k, y in zip(ks[1:-1], wcss[1:-1]):
+                d = abs((y1 - y0) * k - (x1 - x0) * y + x1 * y0 - y1 * x0) / den
+                if d > dmax:
+                    dmax = d
+                    elbow_k = k
+    return {
+        "project_id": int(project_id),
+        "source": "dem/band_1.img",
+        "ks": ks,
+        "wcss": wcss,
+        "elbow_k": elbow_k,
+        "sample_size": int(x.shape[0]),
+    }
+
+
+@router.get("/preprocess/soilplus-cluster-preview/{project_id}")
+def get_soilplus_cluster_preview(
+    project_id: int,
+    n_clusters: int = Query(4, ge=2, le=30),
+    sample_max: int = Query(20000, ge=2000, le=120000),
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(tenant_from_jwt),
+):
+    project = db.query(Project).filter(Project.id == project_id, Project.tenant_id == tenant_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    _, arr, mask = _load_soilplus_dem_band1(project_id, tenant_id)
+    x = arr[mask].reshape(-1, 1).astype(np.float64)
+    n = x.shape[0]
+    if n > sample_max:
+        rng = np.random.default_rng(42)
+        idx = rng.choice(n, size=int(sample_max), replace=False)
+        x_fit = x[idx]
+    else:
+        x_fit = x
+    km = KMeans(n_clusters=int(n_clusters), random_state=42, n_init=10)
+    km.fit(x_fit)
+    # Etiquetar todos los píxeles válidos con el modelo ajustado.
+    all_labels = km.predict(x).astype(np.int16)
+    lab_map = np.full(arr.shape, -1, dtype=np.int16)
+    lab_map[mask] = all_labels
+    png = _soilplus_cluster_png(lab_map, mask, int(n_clusters))
+    return Response(content=png, media_type="image/png")
+
+
 @router.get("/preprocess/recortes-preview/{project_id}")
 def get_recorte_preview_disk(
     project_id: int,
@@ -1388,6 +1713,7 @@ def _sample_pixel_series_from_stacks(
     index_list: tuple[str, ...],
     max_pixel_series: int,
     random_seed: int,
+    roi_selection: RoiSelectionNormalized | None = None,
 ) -> tuple[dict[str, list[list[float]]], int, int]:
     """
     Píxeles válidos en **todas** las fechas y **todos** los índices; muestreo aleatorio sin reemplazo.
@@ -1396,6 +1722,8 @@ def _sample_pixel_series_from_stacks(
     first = stacked[index_list[0]]
     t, h, w = first.shape
     mask = np.ones((h, w), dtype=bool)
+    if roi_selection is not None:
+        mask &= _roi_mask_from_selection(roi_selection, h, w)
     for ix in index_list:
         mask &= np.isfinite(stacked[ix]).all(axis=0)
     flat_valid = np.flatnonzero(mask)
@@ -1414,6 +1742,45 @@ def _sample_pixel_series_from_stacks(
             lists.append(vol[:, r, c].astype(np.float64).tolist())
         series_by_index[ix] = lists
     return series_by_index, n_take, n_valid
+
+
+def _roi_mask_for_polygon(points: list, h: int, w: int) -> np.ndarray:
+    if len(points) < 3:
+        return np.zeros((h, w), dtype=bool)
+    px = np.array([float(p.x) for p in points], dtype=np.float64)
+    py = np.array([float(p.y) for p in points], dtype=np.float64)
+    cols = (np.arange(w, dtype=np.float64) + 0.5) / max(w, 1)
+    rows = (np.arange(h, dtype=np.float64) + 0.5) / max(h, 1)
+    xg, yg = np.meshgrid(cols, rows)
+    inside = np.zeros((h, w), dtype=bool)
+    j = len(points) - 1
+    eps = 1e-12
+    for i in range(len(points)):
+        xi, yi = px[i], py[i]
+        xj, yj = px[j], py[j]
+        dy = yj - yi
+        denom = dy if abs(dy) > eps else eps
+        cross = xi + ((yg - yi) * (xj - xi) / denom)
+        intersects = ((yi > yg) != (yj > yg)) & (xg < cross)
+        inside ^= intersects
+        j = i
+    return inside
+
+
+def _roi_mask_from_selection(roi_selection: RoiSelectionNormalized, h: int, w: int) -> np.ndarray:
+    if roi_selection.polygon_points:
+        return _roi_mask_for_polygon(roi_selection.polygon_points, h, w)
+    c0 = int(np.floor(float(roi_selection.x1) * w))
+    c1 = int(np.ceil(float(roi_selection.x2) * w))
+    r0 = int(np.floor(float(roi_selection.y1) * h))
+    r1 = int(np.ceil(float(roi_selection.y2) * h))
+    c0 = min(max(c0, 0), w - 1)
+    c1 = min(max(c1, c0 + 1), w)
+    r0 = min(max(r0, 0), h - 1)
+    r1 = min(max(r1, r0 + 1), h)
+    roi_mask = np.zeros((h, w), dtype=bool)
+    roi_mask[r0:r1, c0:c1] = True
+    return roi_mask
 
 
 @router.post("/preprocess/vegetation-time-series")
@@ -1519,11 +1886,17 @@ def preprocess_vegetation_time_series(
         raise HTTPException(status_code=500, detail=f"No se pudieron alinear índices en el tiempo: {exc!s}") from exc
 
     points: list[dict] = []
+    first = stacked[index_list[0]]
+    _, h, w = first.shape
+    roi_mask = np.ones((h, w), dtype=bool)
+    if payload.roi_selection is not None:
+        roi_mask = _roi_mask_from_selection(payload.roi_selection, h, w)
+
     for t, (date, _path, rid) in enumerate(scenes):
         row: dict = {"date": date, "raster_layer_id": rid if rid is not None else 0, "by_index": {}}
         for ix in index_list:
             plane = stacked[ix][t]
-            fin = plane[np.isfinite(plane)]
+            fin = plane[np.isfinite(plane) & roi_mask]
             if fin.size == 0:
                 row["by_index"][ix] = {
                     "mean": None,
@@ -1558,6 +1931,7 @@ def preprocess_vegetation_time_series(
         index_list,
         payload.max_pixel_series,
         payload.random_seed,
+        payload.roi_selection,
     )
 
     agg_desc = (
@@ -1569,10 +1943,13 @@ def preprocess_vegetation_time_series(
             "PlanetScope (8 bandas): mismos índices que el catálogo PS; normalización min-max por escena; "
             "series por píxel en [0,1]. Muestreo aleatorio de píxeles válidos en todas las fechas."
         )
+    if payload.roi_selection is not None:
+        agg_desc = f"{agg_desc} Filtrado espacial por ROI normalizado."
 
     return {
         "project_id": payload.project_id,
         "pipeline_variant": pv,
+        "roi_selection": payload.roi_selection.model_dump() if payload.roi_selection is not None else None,
         "dates": [d for d, _, _ in scenes],
         "indices": list(index_list),
         "points": points,
@@ -1650,11 +2027,17 @@ def preprocess_s1_sar_time_series(
         raise HTTPException(status_code=500, detail=f"No se pudieron leer los stacks SAR: {exc!s}") from exc
 
     points: list[dict] = []
+    first = stacked[INDEX_LIST[0]]
+    _, h, w = first.shape
+    roi_mask = np.ones((h, w), dtype=bool)
+    if payload.roi_selection is not None:
+        roi_mask = _roi_mask_from_selection(payload.roi_selection, h, w)
+
     for t, date in enumerate(wanted_sorted):
         row: dict = {"date": date, "raster_layer_id": t + 1, "by_index": {}}
         for ix in INDEX_LIST:
             plane = stacked[ix][t]
-            fin = plane[np.isfinite(plane)]
+            fin = plane[np.isfinite(plane) & roi_mask]
             if fin.size == 0:
                 row["by_index"][ix] = {
                     "mean": None,
@@ -1689,20 +2072,23 @@ def preprocess_s1_sar_time_series(
         INDEX_LIST,
         payload.max_pixel_series,
         payload.random_seed,
+        payload.roi_selection.model_dump() if payload.roi_selection is not None else None,
     )
 
     return {
         "source": "s1_sar",
         "project_id": payload.project_id,
+        "roi_selection": payload.roi_selection.model_dump() if payload.roi_selection is not None else None,
         "dates": wanted_sorted,
         "indices": list(INDEX_LIST),
         "points": points,
         "temporal_stats": temporal_stats,
         "spatial_aggregation": {
-            "method": "all_valid_pixels",
+            "method": "all_valid_pixels_in_roi" if payload.roi_selection is not None else "all_valid_pixels",
             "description": (
                 "Índices SAR por fecha desde s1indices/; normalización min-max por fecha en cada índice. "
                 "Muestreo aleatorio de píxeles válidos en todas las fechas e índices."
+                + (" Filtrado espacial por ROI normalizado." if payload.roi_selection is not None else "")
             ),
         },
         "per_pixel": {

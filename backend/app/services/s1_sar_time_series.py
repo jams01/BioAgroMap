@@ -156,6 +156,7 @@ def sample_pixel_series_from_stacks(
     index_list: tuple[str, ...],
     max_pixel_series: int,
     random_seed: int,
+    roi_selection: dict | None = None,
 ) -> tuple[dict[str, list[list[float]]], int, int]:
     """
     Píxeles válidos en **todas** las fechas y **todos** los índices; muestreo aleatorio sin reemplazo.
@@ -164,6 +165,12 @@ def sample_pixel_series_from_stacks(
     first = stacked[index_list[0]]
     t, h, w = first.shape
     mask = np.ones((h, w), dtype=bool)
+    if roi_selection:
+        try:
+            mask &= _roi_mask_from_selection_dict(roi_selection, h, w)
+        except Exception:
+            # Si el ROI llega malformado, se ignora para mantener compatibilidad.
+            pass
     for ix in index_list:
         mask &= np.isfinite(stacked[ix]).all(axis=0)
     flat_valid = np.flatnonzero(mask)
@@ -182,3 +189,47 @@ def sample_pixel_series_from_stacks(
             lists.append(vol[:, r, c].astype(np.float64).tolist())
         series_by_index[ix] = lists
     return series_by_index, n_take, n_valid
+
+
+def _roi_mask_for_polygon_dict(points: list[dict], h: int, w: int) -> np.ndarray:
+    if len(points) < 3:
+        return np.zeros((h, w), dtype=bool)
+    px = np.array([float(p.get("x", 0.0)) for p in points], dtype=np.float64)
+    py = np.array([float(p.get("y", 0.0)) for p in points], dtype=np.float64)
+    cols = (np.arange(w, dtype=np.float64) + 0.5) / max(w, 1)
+    rows = (np.arange(h, dtype=np.float64) + 0.5) / max(h, 1)
+    xg, yg = np.meshgrid(cols, rows)
+    inside = np.zeros((h, w), dtype=bool)
+    j = len(points) - 1
+    eps = 1e-12
+    for i in range(len(points)):
+        xi, yi = px[i], py[i]
+        xj, yj = px[j], py[j]
+        dy = yj - yi
+        denom = dy if abs(dy) > eps else eps
+        cross = xi + ((yg - yi) * (xj - xi) / denom)
+        intersects = ((yi > yg) != (yj > yg)) & (xg < cross)
+        inside ^= intersects
+        j = i
+    return inside
+
+
+def _roi_mask_from_selection_dict(roi_selection: dict, h: int, w: int) -> np.ndarray:
+    points = roi_selection.get("polygon_points")
+    if isinstance(points, list) and len(points) >= 3:
+        return _roi_mask_for_polygon_dict(points, h, w)
+    x1 = float(roi_selection.get("x1", 0.0))
+    y1 = float(roi_selection.get("y1", 0.0))
+    x2 = float(roi_selection.get("x2", 1.0))
+    y2 = float(roi_selection.get("y2", 1.0))
+    c0 = int(np.floor(x1 * w))
+    c1 = int(np.ceil(x2 * w))
+    r0 = int(np.floor(y1 * h))
+    r1 = int(np.ceil(y2 * h))
+    c0 = min(max(c0, 0), w - 1)
+    c1 = min(max(c1, c0 + 1), w)
+    r0 = min(max(r0, 0), h - 1)
+    r1 = min(max(r1, r0 + 1), h)
+    roi_mask = np.zeros((h, w), dtype=bool)
+    roi_mask[r0:r1, c0:c1] = True
+    return roi_mask

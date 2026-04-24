@@ -16,7 +16,10 @@ def _default_storage_path() -> str:
     En contenedor suele existir ``/data/storage``; en el repo local suele existir ``…/BioAgroMap/backend``.
     """
     core_dir = Path(__file__).resolve().parent
+    railway_mount = Path(os.getenv("RAILWAY_VOLUME_MOUNT_PATH", "").strip()) if os.getenv("RAILWAY_VOLUME_MOUNT_PATH") else None
     docker_root = Path("/data/storage")
+    if railway_mount and str(railway_mount).strip():
+        return str((railway_mount / "storage").resolve())
     if len(core_dir.parents) > 2:
         repo = core_dir.parents[2]
         if (repo / "backend").is_dir():

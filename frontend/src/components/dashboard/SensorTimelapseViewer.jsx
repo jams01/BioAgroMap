@@ -48,6 +48,7 @@ export default function SensorTimelapseViewer({
   interactive = false,
   roiMode = false,
   onToggleRoi,
+  onClearRoi,
   roiSelection = null,
   clusterPreviewB64 = null,
   clusterVisible = true,
@@ -57,6 +58,10 @@ export default function SensorTimelapseViewer({
   onMediaClick,
 }) {
   const current = frames[currentIdx] || null;
+  const roiPoints = Array.isArray(roiSelection?.polygon_points) ? roiSelection.polygon_points : [];
+  const roiPointsSvg = roiPoints.map((p) => `${p.x * 100},${p.y * 100}`).join(" ");
+  const roiHasShape = roiPoints.length > 0;
+  const roiCanClose = roiPoints.length >= 3;
 
   const mediaHandlers = useMemo(
     () =>
@@ -73,6 +78,23 @@ export default function SensorTimelapseViewer({
 
   const showRoi = typeof onToggleRoi === "function";
   const dateStr = formatDate(current?.date);
+  const roiOverlay = roiHasShape ? (
+    <svg
+      viewBox="0 0 100 100"
+      preserveAspectRatio="none"
+      style={{ position: "absolute", inset: 0, pointerEvents: "none" }}
+      aria-hidden="true"
+    >
+      {roiCanClose ? (
+        <polygon points={roiPointsSvg} fill="rgba(0, 140, 255, 0.18)" stroke="#008cff" strokeWidth="0.7" />
+      ) : (
+        <polyline points={roiPointsSvg} fill="none" stroke="#008cff" strokeWidth="0.7" />
+      )}
+      {roiPoints.map((p, idx) => (
+        <circle key={`roi-pt-${idx}`} cx={p.x * 100} cy={p.y * 100} r="0.8" fill="#008cff" />
+      ))}
+    </svg>
+  ) : null;
 
   const indexSelectContent = useMemo(() => {
     const list = indices || [];
@@ -154,17 +176,7 @@ export default function SensorTimelapseViewer({
                 alt=""
               />
             ) : null}
-            {roiSelection ? (
-              <div
-                className="adv-roi-rect"
-                style={{
-                  left: `${roiSelection.x1 * 100}%`,
-                  top: `${roiSelection.y1 * 100}%`,
-                  width: `${(roiSelection.x2 - roiSelection.x1) * 100}%`,
-                  height: `${(roiSelection.y2 - roiSelection.y1) * 100}%`,
-                }}
-              />
-            ) : null}
+            {roiOverlay}
           </>
         ) : (
           <img className="adv-viewer-stack-img" src={imageSrc} alt={imageAlt} style={{ opacity }} />
@@ -202,17 +214,7 @@ export default function SensorTimelapseViewer({
                 alt=""
               />
             ) : null}
-            {roiSelection ? (
-              <div
-                className="adv-roi-rect"
-                style={{
-                  left: `${roiSelection.x1 * 100}%`,
-                  top: `${roiSelection.y1 * 100}%`,
-                  width: `${(roiSelection.x2 - roiSelection.x1) * 100}%`,
-                  height: `${(roiSelection.y2 - roiSelection.y1) * 100}%`,
-                }}
-              />
-            ) : null}
+            {roiOverlay}
           </>
         ) : (
           <img src={imageSrc} alt={imageAlt} style={{ opacity }} />
@@ -261,9 +263,19 @@ export default function SensorTimelapseViewer({
             type="button"
             onClick={() => onToggleRoi()}
             className={roiMode ? "adv-btn-active adv-viewer-roi-btn" : "adv-viewer-roi-btn"}
-            title={roiMode ? "Modo ROI activo: arrastra sobre la imagen" : "Activar selección ROI"}
+            title={roiMode ? "Modo ROI activo: haz clic para agregar vértices del polígono" : "Activar selección ROI"}
           >
             {roiMode ? "ROI activo" : "ROI"}
+          </button>
+        ) : null}
+        {showRoi && roiHasShape && typeof onClearRoi === "function" ? (
+          <button
+            type="button"
+            onClick={() => onClearRoi()}
+            className="adv-viewer-roi-btn"
+            title="Quitar polígono ROI"
+          >
+            Limpiar ROI
           </button>
         ) : null}
       </div>

@@ -2378,7 +2378,7 @@ body {
   border: 1px solid #e6e9f2;
   border-radius: 10px;
   padding: 8px 10px 10px;
-  background: #fafbfd;
+  background: #ffffff;
 }
 
 /* 75% alto: pestañas + toolbar + visor. 25%: panel geofísica estático. */
@@ -2415,6 +2415,28 @@ body {
   line-height: 1.25;
 }
 
+.adv-timelapse-geofisica-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.adv-soilplus-btn {
+  border: 1px solid #2d6cdf;
+  background: #eaf1ff;
+  color: #153a7a;
+  border-radius: 8px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.adv-soilplus-btn:hover {
+  background: #d9e8ff;
+}
+
 .adv-timelapse-geofisica-frame {
   flex: 1 1 0;
   min-height: 0;
@@ -2434,6 +2456,236 @@ body {
   height: auto;
   object-fit: contain;
   display: block;
+}
+
+.adv-soilplus-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 4300;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 14px;
+}
+
+.adv-soilplus-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.52);
+}
+
+.adv-soilplus-window {
+  position: relative;
+  z-index: 1;
+  width: min(1700px, 96vw);
+  height: min(94vh, 1100px);
+  background: #fff;
+  border-radius: 12px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.28);
+  padding: 14px 16px;
+  overflow: auto;
+}
+
+.adv-soilplus-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.adv-soilplus-header h3 {
+  margin: 0;
+}
+
+.adv-soilplus-note {
+  margin: 8px 0 12px;
+  font-size: 12px;
+  color: #475569;
+}
+
+.adv-soilplus-controls {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.adv-soilplus-run-btn {
+  border: 1px solid #2d6cdf;
+  background: #1f4cc8;
+  color: #fff;
+  border-radius: 8px;
+  padding: 7px 14px;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.adv-soilplus-run-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.adv-soilplus-dem-path {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: #334155;
+}
+
+.adv-soilplus-dem-meta {
+  margin: 0;
+  font-size: 12px;
+  color: #334155;
+}
+
+.adv-soilplus-controls label {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.adv-soilplus-controls input {
+  width: 120px;
+  padding: 6px 8px;
+  border: 1px solid #cfd8ea;
+  border-radius: 6px;
+}
+
+.adv-soilplus-badge {
+  font-size: 12px;
+  color: #153a7a;
+  background: #eef4ff;
+  border: 1px solid #cbd9f8;
+  border-radius: 999px;
+  padding: 4px 10px;
+}
+
+.adv-soilplus-badge--err {
+  color: #b00020;
+  background: #fde8ec;
+  border-color: #f7c5d0;
+}
+
+.adv-soilplus-grid {
+  margin-top: 12px;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.adv-soilplus-card {
+  border: 1px solid #dbe3f2;
+  border-radius: 10px;
+  background: #fff;
+  padding: 10px;
+}
+
+.adv-soilplus-card h4 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  color: #1e3a65;
+}
+
+.adv-soilplus-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.adv-soilplus-bar-row {
+  display: grid;
+  grid-template-columns: 1.2fr minmax(110px, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  font-size: 12px;
+}
+
+.adv-soilplus-bar-track {
+  height: 10px;
+  border-radius: 999px;
+  overflow: hidden;
+  border: 1px solid #d1dae9;
+  background: #f8fafc;
+}
+
+.adv-soilplus-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #2d6cdf, #0ea5e9);
+}
+
+.adv-soilplus-svg {
+  width: 100%;
+  height: auto;
+  min-height: 220px;
+  border: 1px solid #edf2fa;
+  border-radius: 8px;
+  background: #fcfdff;
+}
+
+.adv-soilplus-image-frame {
+  margin-top: 8px;
+  border: 1px solid #edf2fa;
+  border-radius: 8px;
+  background: #fcfdff;
+  min-height: 230px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.adv-soilplus-image {
+  width: 100%;
+  height: 100%;
+  max-height: 320px;
+  object-fit: contain;
+  display: block;
+}
+
+.adv-soilplus-image--zoomable {
+  transform-origin: center center;
+  transition: transform 0.04s linear;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+.adv-soilplus-image-empty {
+  font-size: 12px;
+  color: #64748b;
+}
+
+.adv-soilplus-image-frame--cluster {
+  min-height: 320px;
+}
+
+.adv-soilplus-cluster-scroll {
+  overflow: auto;
+  cursor: grab;
+}
+
+.adv-soilplus-cluster-scroll.is-dragging {
+  cursor: grabbing;
+}
+
+.adv-soilplus-zoom-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.adv-soilplus-zoom-tools button {
+  padding: 4px 8px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  background: #fff;
+  cursor: pointer;
+}
+
+.adv-soilplus-zoom-tools input[type="range"] {
+  width: 120px;
 }
 
 .adv-sensor-tabs {
@@ -2521,7 +2773,7 @@ body {
   border-radius: 10px;
   padding: 10px 12px;
   overflow: hidden;
-  background: #fafbfd;
+  background: #ffffff;
   display: flex;
   flex-direction: column;
 }
@@ -2584,7 +2836,7 @@ body {
   flex-direction: column;
   border: 1px solid #2d6cdf;
   border-radius: 8px;
-  background: #fafbfd;
+  background: #ffffff;
   overflow: hidden;
   padding: 4px;
 }
@@ -2672,7 +2924,7 @@ body {
 
 .adv-viewer-media {
   border: 1px solid #ecedf3;
-  background: #f7f8fb;
+  background: #ffffff;
   border-radius: 8px;
   min-height: 0;
   height: 100%;
@@ -2752,7 +3004,7 @@ body {
   border-radius: 8px;
   overflow: hidden;
   border: 1px solid #ecedf3;
-  background: #f7f8fb;
+  background: #ffffff;
   min-height: 120px;
 }
 
@@ -2796,7 +3048,7 @@ body {
   padding: 10px;
   text-align: center;
   z-index: 1;
-  background: rgba(247, 248, 251, 0.92);
+  background: rgba(255, 255, 255, 0.92);
 }
 
 .adv-viewer-stack-img,

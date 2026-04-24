@@ -333,7 +333,7 @@ def run_ps_spatiotemporal_cluster(
 
 
 def cluster_map_to_png(tif_path: Path, max_dim: int = 1024) -> bytes:
-    """PNG RGB con colores discretos por cluster; nodata (255) en gris claro."""
+    """PNG RGB con colores discretos por cluster; fondo y nodata (255) en blanco."""
     with rasterio.open(tif_path) as src:
         scale = min(1.0, float(max_dim) / max(src.height, src.width))
         h = max(1, int(round(src.height * scale)))
@@ -341,7 +341,7 @@ def cluster_map_to_png(tif_path: Path, max_dim: int = 1024) -> bytes:
         lab = src.read(1, out_shape=(h, w), resampling=Resampling.nearest)
     u8 = lab.astype(np.uint8)
     rgb = np.zeros((h, w, 3), dtype=np.uint8)
-    rgb[:] = (240, 240, 240)
+    rgb[:] = (255, 255, 255)
     flat = u8.ravel()
     for v in np.unique(flat):
         if v == 255:

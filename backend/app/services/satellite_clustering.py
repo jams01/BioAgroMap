@@ -459,7 +459,7 @@ def run_gmm_fit(
 
 
 def _labels_to_rgb_preview(labels_2d: np.ndarray, nodata: int = -1) -> np.ndarray:
-    """Mapa de etiquetas → RGB uint8 (tab20; sin datos gris oscuro, no negro puro)."""
+    """Mapa de etiquetas → RGB uint8 (tab20; sin datos blanco, alineado al dashboard)."""
     h, w = labels_2d.shape
     uniq = np.unique(labels_2d[labels_2d >= 0])
     import matplotlib
@@ -468,13 +468,13 @@ def _labels_to_rgb_preview(labels_2d: np.ndarray, nodata: int = -1) -> np.ndarra
     import matplotlib.pyplot as plt
 
     cmap = plt.get_cmap("tab20")
-    out = np.full((h, w, 3), 40, dtype=np.uint8)  # fondo nodata gris oscuro
+    out = np.full((h, w, 3), 255, dtype=np.uint8)
     for u in uniq:
         mask = labels_2d == u
         rgba = cmap(int(u) % 20)
         out[mask] = (np.array(rgba[:3]) * 255).astype(np.uint8)
     if nodata < 0:
-        out[labels_2d < 0] = (40, 40, 40)
+        out[labels_2d < 0] = (255, 255, 255)
     return out
 
 
@@ -483,7 +483,7 @@ def plot_cluster_map_png(labels: np.ndarray, title: str) -> str:
     PNG base64 de mapa categórico (baja resolución si hace falta).
 
     El tamaño de figura sigue el aspect ratio del raster para evitar franjas laterales
-    (fondo #1a1a1a) en recortes muy alargados. ``title`` se conserva en la firma por
+    (fondo blanco) en recortes muy alargados. ``title`` se conserva en la firma por
     compatibilidad; el título se muestra en la UI (modal / panel), no dentro del PNG.
     """
     import matplotlib
@@ -518,8 +518,8 @@ def plot_cluster_map_png(labels: np.ndarray, title: str) -> str:
     w_in = max(w_in, 0.25)
     h_in = max(h_in, 0.25)
 
-    fig, ax = plt.subplots(figsize=(w_in, h_in), dpi=100, facecolor="#1a1a1a")
-    ax.set_facecolor("#1a1a1a")
+    fig, ax = plt.subplots(figsize=(w_in, h_in), dpi=100, facecolor="#ffffff")
+    ax.set_facecolor("#ffffff")
     ax.imshow(rgb, interpolation="nearest")
     ax.set_axis_off()
     plt.subplots_adjust(0, 0, 1, 1, 0, 0)
@@ -529,7 +529,7 @@ def plot_cluster_map_png(labels: np.ndarray, title: str) -> str:
         format="png",
         bbox_inches="tight",
         pad_inches=0.02,
-        facecolor="#1a1a1a",
+        facecolor="#ffffff",
     )
     plt.close(fig)
     buf.seek(0)
