@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
 import api, {
   clearAuthTokens,
@@ -29,6 +29,12 @@ const INDEX_IDS_S2 = new Set(
 const INDEX_IDS_PS = new Set(
   INDEX_CATALOG_PS.filter((o) => o.id !== "TODOS").map((o) => o.id)
 );
+
+function normalizeUserRole(role) {
+  const value = String(role || "").trim().toLowerCase();
+  if (value === "client") return "cliente";
+  return value;
+}
 
 /** Sentinel-2 ZIP antiguo: una capa por banda (B02…B08). Ocultar; solo vistas RGB/NIR. */
 function isLegacyS2ZipBandRaster(meta) {
@@ -89,8 +95,9 @@ export default function App() {
   const [studyRequestOpen, setStudyRequestOpen] = useState(false);
   const [studyOrdersOpen, setStudyOrdersOpen] = useState(false);
   const [studyDraw, setStudyDraw] = useState(null);
-  const isAdmin = userRole === "admin";
-  const isCliente = userRole === "cliente";
+  const normalizedUserRole = normalizeUserRole(userRole);
+  const isAdmin = normalizedUserRole === "admin";
+  const isCliente = normalizedUserRole === "cliente";
 
   const finalizeStudyPolygon = useCallback(() => {
     setStudyDraw((d) => {
@@ -160,7 +167,7 @@ export default function App() {
       try {
         setAuthToken(token);
         const res = await api.get("/auth/me");
-        if (!cancelled) setUserRole(String(res.data?.role || ""));
+        if (!cancelled) setUserRole(normalizeUserRole(res.data?.role));
       } catch (_) {
         if (!cancelled) setUserRole("");
       }
@@ -176,10 +183,10 @@ export default function App() {
       setSidebarTab("admin");
       return;
     }
-    if (userRole === "cliente") {
+    if (normalizedUserRole === "cliente") {
       setSidebarTab("dashboard");
     }
-  }, [token, userRole]);
+  }, [token, normalizedUserRole]);
 
   useEffect(() => {
     const onRefreshed = (e) => {
@@ -742,7 +749,7 @@ export default function App() {
       });
       const accessToken = res.data.access_token;
       setToken(accessToken);
-      setUserRole(String(res.data.role || ""));
+      setUserRole(normalizeUserRole(res.data?.role));
       persistAuthTokens(accessToken, res.data.refresh_token);
       const userProjects = await fetchProjects(accessToken);
       setMessage(`Cuenta creada. ${userProjects.length} proyecto(s) encontrado(s).`);
@@ -772,7 +779,7 @@ export default function App() {
       });
       const accessToken = res.data.access_token;
       setToken(accessToken);
-      setUserRole(String(res.data.role || ""));
+      setUserRole(normalizeUserRole(res.data?.role));
       persistAuthTokens(accessToken, res.data.refresh_token);
       const userProjects = await fetchProjects(accessToken);
       setMessage(`Sesion iniciada. ${userProjects.length} proyecto(s) encontrado(s).`);
@@ -851,7 +858,7 @@ export default function App() {
       const res = await api.post("/auth/verify-otp", { email: pendingRegEmail, code: c });
       const accessToken = res.data.access_token;
       setToken(accessToken);
-      setUserRole(String(res.data.role || ""));
+      setUserRole(normalizeUserRole(res.data?.role));
       persistAuthTokens(accessToken, res.data.refresh_token);
       const userProjects = await fetchProjects(accessToken);
       const tpw = res.data.temporary_password;
@@ -1411,6 +1418,11 @@ export default function App() {
     return data;
   }
 
+  const dashboardProjectStatus = useMemo(() => {
+    const p = projects.find((x) => Number(x.id) === Number(projectId));
+    return p?.status;
+  }, [projects, projectId]);
+
   return (
     <div className="layout">
       <Sidebar
@@ -1430,7 +1442,7 @@ export default function App() {
           setPreproClusterVizKick((k) => k + 1);
         }}
         token={token}
-        userRole={userRole}
+        userRole={normalizedUserRole}
         email={email}
         setEmail={setEmail}
         password={password}
@@ -1472,6 +1484,11 @@ export default function App() {
         }}
         onOpenClientDashboard={() => {
           if (token) fetchProjects(token);
+          if (!projectId) {
+            setMessage("Seleccione un proyecto publicado para abrir el dashboard de resultados.");
+            return;
+          }
+          setDashboardOpen(true);
         }}
         onOpenUserManagement={() => {
           if (!isAdmin) {
@@ -1546,10 +1563,12 @@ export default function App() {
         studyDraw={studyDraw}
       />
       <AdvancedDashboard
-        open={dashboardOpen && isAdmin}
+        open={dashboardOpen && !!token && !!projectId && (isAdmin || isCliente)}
         onClose={() => setDashboardOpen(false)}
         token={token}
         projectId={projectId}
+        isCliente={isCliente}
+        projectStatus={dashboardProjectStatus}
       />
       <UserManagementModal
         open={userMgmtOpen && isAdmin}
@@ -1560,6 +1579,9 @@ export default function App() {
       <StudyRequestModal
         open={studyRequestOpen && !!token}
         token={token}
+        onOrderSuccess={() => {
+          if (token) fetchProjects(token);
+        }}
         onClose={() => {
           setStudyRequestOpen(false);
           setStudyDraw(null);

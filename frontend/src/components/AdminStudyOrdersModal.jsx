@@ -1,11 +1,11 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import api, { setAuthToken } from "../api";
 import OrderPreviewMap from "./OrderPreviewMap";
 
 const STATUS_OPTS = [
   { value: "pendiente", label: "Pendiente" },
-  { value: "en proceso", label: "En proceso" },
-  { value: "completado", label: "Completado" },
+  { value: "procesado", label: "Procesado" },
+  { value: "publicado", label: "Publicado" },
 ];
 
 export default function AdminStudyOrdersModal({ open, token, onClose, onStatusMessage }) {
@@ -14,6 +14,21 @@ export default function AdminStudyOrdersModal({ open, token, onClose, onStatusMe
   const [error, setError] = useState("");
   const [detail, setDetail] = useState(null);
   const [saving, setSaving] = useState(false);
+  const [selectedStatus, setSelectedStatus] = useState("");
+  const [confirmationMsg, setConfirmationMsg] = useState("");
+
+  const groupedOrders = useMemo(() => {
+    const byEmail = new Map();
+    for (const r of rows) {
+      const email = (r.user_email || "").trim() || "(sin correo)";
+      if (!byEmail.has(email)) byEmail.set(email, []);
+      byEmail.get(email).push(r);
+    }
+    for (const [, list] of byEmail) {
+      list.sort((a, b) => (Number(b.id) || 0) - (Number(a.id) || 0));
+    }
+    return Array.from(byEmail.entries()).sort(([a], [b]) => a.localeCompare(b, "es", { sensitivity: "base" }));
+  }, [rows]);
 
   async function loadList() {
     setLoading(true);
@@ -36,44 +51,39 @@ export default function AdminStudyOrdersModal({ open, token, onClose, onStatusMe
 
   async function openDetail(id) {
     setError("");
+    setConfirmationMsg("");
     try {
       setAuthToken(token);
       const res = await api.get(`/study-orders/${id}`);
       setDetail(res.data);
+      setSelectedStatus(String(res.data?.status || ""));
     } catch (e) {
       setError(e?.response?.data?.detail || e?.message || "Error al cargar detalle");
     }
   }
 
-  async function saveStatus(newStatus) {
+  async function saveStatus() {
     if (!detail) return;
+    const newStatus = String(selectedStatus || "").trim().toLowerCase();
+    if (!newStatus || newStatus === detail.status) return;
     setSaving(true);
     setError("");
+    setConfirmationMsg("");
     try {
       setAuthToken(token);
       const res = await api.patch(`/study-orders/${detail.id}`, { status: newStatus });
       setDetail(res.data);
+      setSelectedStatus(newStatus);
       setRows((prev) => prev.map((r) => (r.id === detail.id ? { ...r, status: newStatus } : r)));
-      onStatusMessage?.(`Estado actualizado: orden #${detail.id}`);
+      if (newStatus === "publicado") {
+        const msg = `Orden #${detail.id} publicada. El cliente ya puede ver sus resultados en el dashboard.`;
+        setConfirmationMsg(msg);
+        onStatusMessage?.(msg);
+      } else {
+        onStatusMessage?.(`Estado actualizado: orden #${detail.id} -> ${newStatus}`);
+      }
     } catch (e) {
       setError(e?.response?.data?.detail || e?.message || "No se pudo guardar");
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  async function approvePublish() {
-    if (!detail?.project_id) return;
-    setSaving(true);
-    setError("");
-    try {
-      setAuthToken(token);
-      await api.patch(`/projects/${detail.project_id}/status`, { status: "publicado" });
-      onStatusMessage?.(`Proyecto #${detail.project_id} publicado`);
-      await openDetail(detail.id);
-      await loadList();
-    } catch (e) {
-      setError(e?.response?.data?.detail || e?.message || "No se pudo publicar");
     } finally {
       setSaving(false);
     }
@@ -86,13 +96,27 @@ export default function AdminStudyOrdersModal({ open, token, onClose, onStatusMe
       <div className="rgb-gallery-backdrop" onClick={onClose} />
       <div className="index-modal user-mgmt-modal orders-modal">
         <div className="index-modal-header">
-          <h3>{detail ? `Orden #${detail.id}` : "Órdenes AgroGeoFísico"}</h3>
+          <h3 className="orders-modal-title">
+            {detail ? (
+              <>
+                <strong className="orders-head-id">Orden #{detail.id}</strong>
+                <span className="orders-head-sep" aria-hidden="true">
+                  {" "}
+                  ·{" "}
+                </span>
+                <strong className="orders-head-project">{detail.project_name || "—"}</strong>
+              </>
+            ) : (
+              "Órdenes AgroGeoFísico"
+            )}
+          </h3>
           <button type="button" className="index-modal-close" onClick={onClose} aria-label="Cerrar">
             &times;
           </button>
         </div>
         <div className="index-modal-body user-mgmt-body">
           {error ? <p className="status-msg">{error}</p> : null}
+          {confirmationMsg ? <p className="status-msg">{confirmationMsg}</p> : null}
 
           {!detail ? (
             <>
@@ -104,22 +128,40 @@ export default function AdminStudyOrdersModal({ open, token, onClose, onStatusMe
               {loading && rows.length === 0 ? <p className="projects-empty">Cargando…</p> : null}
               {!loading && rows.length === 0 ? <p className="projects-empty">No hay solicitudes.</p> : null}
               {rows.length > 0 ? (
-                <ul className="orders-list">
-                  {rows.map((r) => (
-                    <li key={r.id} className="orders-row">
-                      <div>
-                        <div className="orders-email">{r.user_email}</div>
-                        <div className="orders-meta">
-                          #{r.id} · proyecto: {r.project_name || r.project_id || "—"} · {r.created_at} · cultivo: {r.crop || "—"} ·{" "}
-                          <span className="orders-status">{r.status}</span>
-                        </div>
-                      </div>
-                      <button type="button" className="user-mgmt-btn secondary" onClick={() => openDetail(r.id)}>
-                        Ver detalle
-                      </button>
-                    </li>
+                <div className="orders-groups">
+                  {groupedOrders.map(([email, list], gidx) => (
+                    <section key={email} className="orders-group" aria-labelledby={`orders-user-${gidx}`}>
+                      <h4 id={`orders-user-${gidx}`} className="orders-group-user">
+                        {email}
+                      </h4>
+                      <ul className="orders-list">
+                        {list.map((r) => (
+                          <li key={r.id} className="orders-row">
+                            <div className="orders-row-text">
+                              <div className="orders-row-primary">
+                                <strong className="orders-order-id">#{r.id}</strong>
+                                <span className="orders-primary-sep" aria-hidden="true">
+                                  {" "}
+                                  ·{" "}
+                                </span>
+                                <strong className="orders-project-name">
+                                  {r.project_name || (r.project_id != null ? `Proyecto #${r.project_id}` : "Sin proyecto")}
+                                </strong>
+                              </div>
+                              <div className="orders-meta">
+                                {r.created_at} · cultivo: {r.crop || "—"} ·{" "}
+                                <span className="orders-status">{r.status}</span>
+                              </div>
+                            </div>
+                            <button type="button" className="user-mgmt-btn secondary" onClick={() => openDetail(r.id)}>
+                              Ver detalle
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    </section>
                   ))}
-                </ul>
+                </div>
               ) : null}
             </>
           ) : (
@@ -171,9 +213,9 @@ export default function AdminStudyOrdersModal({ open, token, onClose, onStatusMe
                   <label className="order-status-edit">
                     Estado
                     <select
-                      value={detail.status}
+                      value={selectedStatus}
                       disabled={saving}
-                      onChange={(ev) => saveStatus(ev.target.value)}
+                      onChange={(ev) => setSelectedStatus(ev.target.value)}
                     >
                       {STATUS_OPTS.map((o) => (
                         <option key={o.value} value={o.value}>
@@ -185,11 +227,11 @@ export default function AdminStudyOrdersModal({ open, token, onClose, onStatusMe
                   <button
                     type="button"
                     className="user-mgmt-btn secondary"
-                    disabled={saving || !detail.project_id}
-                    onClick={approvePublish}
-                    title="Aprobar para publicar resultados al cliente"
+                    disabled={saving || !selectedStatus || selectedStatus === detail.status}
+                    onClick={saveStatus}
+                    title="Confirmar cambio de estado de la orden"
                   >
-                    Aprobar para publicar
+                    Aceptar
                   </button>
                 </div>
               </div>

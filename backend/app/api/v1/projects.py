@@ -4,6 +4,7 @@ from pathlib import Path
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, require_admin, tenant_from_jwt
@@ -72,7 +73,21 @@ def create_project(
 def list_projects(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     q = db.query(Project).filter(Project.tenant_id == user.tenant_id)
     if str(user.role).lower() == "cliente":
-        q = q.filter(Project.owner_user_id == user.id, Project.status == "publicado")
+        linked_order_projects = (
+            db.query(StudyOrder.project_id)
+            .filter(
+                StudyOrder.user_id == user.id,
+                StudyOrder.project_id.isnot(None),
+            )
+        )
+        # Todos los proyectos del cliente (dueño o vinculados por orden), con cualquier estado;
+        # el estado se muestra en UI; el acceso a resultados publicados sigue filtrado en otros endpoints.
+        q = q.filter(
+            or_(
+                Project.owner_user_id == user.id,
+                Project.id.in_(linked_order_projects),
+            ),
+        )
     projects = q.order_by(Project.id.desc()).all()
     out = []
     for p in projects:

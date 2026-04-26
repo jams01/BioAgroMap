@@ -1,5 +1,21 @@
 import { useState } from "react";
 
+function projectStatusLabel(status) {
+  const s = String(status || "").trim().toLowerCase().replace(/\s+/g, " ");
+  if (s === "en proceso" || s.replace(" ", "") === "enproceso") return "En proceso";
+  const map = {
+    pendiente: "Pendiente",
+    procesado: "Procesado",
+    publicado: "Publicado",
+  };
+  return map[s] || status || "—";
+}
+
+function projectStatusClass(status) {
+  const s = String(status || "").trim().toLowerCase().replace(/\s+/g, "-");
+  return s.replace(/[^a-z0-9-]/g, "") || "unknown";
+}
+
 export default function ProjectList({
   projects,
   projectId,
@@ -85,7 +101,17 @@ export default function ProjectList({
                   </div>
                 ) : (
                   <>
-                    <span className="projects-item-name">{p.name}</span>
+                    <div className="projects-item-title-row">
+                      <span className="projects-item-name">{p.name}</span>
+                      {p.status ? (
+                        <span
+                          className={`projects-item-status projects-item-status--${projectStatusClass(p.status)}`}
+                          title="Estado del proyecto"
+                        >
+                          {projectStatusLabel(p.status)}
+                        </span>
+                      ) : null}
+                    </div>
                     {p.id === Number(projectId) && (
                       <span className="projects-item-check">&#10003;</span>
                     )}

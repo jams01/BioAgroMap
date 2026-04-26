@@ -188,7 +188,14 @@ function computeSampleAllocation(snc, f1, f2, f3) {
   return alloc;
 }
 
-export default function AdvancedDashboard({ open, onClose, token, projectId }) {
+export default function AdvancedDashboard({
+  open,
+  onClose,
+  token,
+  projectId,
+  isCliente = false,
+  projectStatus,
+}) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [sensorData, setSensorData] = useState({ s1: null, s2: null, ps: null });
@@ -249,6 +256,13 @@ export default function AdvancedDashboard({ open, onClose, token, projectId }) {
   const soilDragRef = useRef({ dragging: false, startX: 0, startY: 0, panX: 0, panY: 0 });
   const effectiveToken = token || loadStoredAuth().access || "";
 
+  const clientDashboardBlocked = useMemo(() => {
+    if (!isCliente) return false;
+    if (projectStatus == null || String(projectStatus).trim() === "") return false;
+    const n = String(projectStatus).trim().toLowerCase().replace(/\s+/g, " ");
+    return n !== "publicado";
+  }, [isCliente, projectStatus]);
+
   const frameFor = (sensor) => {
     const sd = sensorData[sensor];
     if (!sd) return null;
@@ -289,6 +303,33 @@ export default function AdvancedDashboard({ open, onClose, token, projectId }) {
     if (!open || !projectId) return;
     let cancelled = false;
     const load = async () => {
+      if (clientDashboardBlocked) {
+        for (const [, url] of previewCacheRef.current.entries()) safeRevokePreviewUrl(url);
+        previewCacheRef.current.clear();
+        setSrcBySensor({ s1: "", s2: "", ps: "" });
+        setRgbSrcBySensor({ s1: "", s2: "", ps: "" });
+        setSensorData({ s1: null, s2: null, ps: null });
+        setRecorteInventory({ s2: [], ps: [] });
+        setS1PrepSigmaItems([]);
+        recortesCacheRef.current = { s2: null, ps: null };
+        setPsStCluster1Preview("");
+        setPsStCluster1Error("");
+        setPsStCluster2Preview("");
+        setPsStCluster2Error("");
+        setPsStCluster3Preview("");
+        setPsStCluster3Error("");
+        setPsStCluster1Busy(false);
+        setPsStCluster2Busy(false);
+        setPsStCluster3Busy(false);
+        setClusterBySensor({ s1: [], s2: [], ps: [] });
+        setSelectedClusterKey({ s1: "", s2: "", ps: "" });
+        setSeriesBySensor({ s1: null, s2: null, ps: null });
+        setClimateBySensor({ s1: [], s2: [], ps: [] });
+        setError("");
+        setLoading(false);
+        loadedProjectRef.current = projectId;
+        return;
+      }
       setLoading(true);
       setError("");
       const projectChanged = loadedProjectRef.current !== projectId;
@@ -385,16 +426,11 @@ export default function AdvancedDashboard({ open, onClose, token, projectId }) {
     return () => {
       cancelled = true;
     };
-  }, [open, projectId, effectiveToken]);
+  }, [open, projectId, effectiveToken, clientDashboardBlocked]);
 
-  /** Al abrir el dashboard: ejecuta pipeline + preview para smart1, smart2 y smart3 (secuencial). */
-  const smartClusterAutoRunIdRef = useRef(0);
-  useEffect(() => {
-    if (!open || !projectId || !effectiveToken) return;
-    const runId = ++smartClusterAutoRunIdRef.current;
-    let cancelled = false;
+  const runSmartClusters = async () => {
+    if (!projectId || !effectiveToken || clientDashboardBlocked) return;
     const base = API_URL.replace(/\/$/, "");
-
     const slot = (preset) =>
       preset === "smart3"
         ? {
@@ -413,44 +449,30 @@ export default function AdvancedDashboard({ open, onClose, token, projectId }) {
               setErr: setPsStCluster1Error,
               setPreview: setPsStCluster1Preview,
             };
-
-    (async () => {
-      if (effectiveToken) setAuthToken(effectiveToken);
-      for (const preset of ["smart1", "smart2", "smart3"]) {
-        if (cancelled || runId !== smartClusterAutoRunIdRef.current) return;
-        const { setBusy, setErr, setPreview } = slot(preset);
-        setBusy(true);
-        setErr("");
-        try {
-          await api.post(
-            `/preprocess/ps-spatiotemporal-cluster/${projectId}`,
-            { n_clusters: 4, random_state: 42 },
-            { params: { preset } }
-          );
-          if (cancelled || runId !== smartClusterAutoRunIdRef.current) return;
-          const dataUrl = await fetchPreviewObjectUrl(
-            `${base}/preprocess/ps-spatiotemporal-cluster-preview/${projectId}?preset=${encodeURIComponent(preset)}`,
-            effectiveToken
-          );
-          if (!cancelled && runId === smartClusterAutoRunIdRef.current) setPreview(dataUrl);
-        } catch (e) {
-          if (!cancelled && runId === smartClusterAutoRunIdRef.current) {
-            setErr(formatApiErrorDetail(e));
-            setPreview("");
-          }
-        } finally {
-          if (!cancelled && runId === smartClusterAutoRunIdRef.current) setBusy(false);
-        }
+    if (effectiveToken) setAuthToken(effectiveToken);
+    for (const preset of ["smart1", "smart2", "smart3"]) {
+      const { setBusy, setErr, setPreview } = slot(preset);
+      setBusy(true);
+      setErr("");
+      try {
+        await api.post(
+          `/preprocess/ps-spatiotemporal-cluster/${projectId}`,
+          { n_clusters: 4, random_state: 42 },
+          { params: { preset } }
+        );
+        const dataUrl = await fetchPreviewObjectUrl(
+          `${base}/preprocess/ps-spatiotemporal-cluster-preview/${projectId}?preset=${encodeURIComponent(preset)}`,
+          effectiveToken
+        );
+        setPreview(dataUrl);
+      } catch (e) {
+        setErr(formatApiErrorDetail(e));
+        setPreview("");
+      } finally {
+        setBusy(false);
       }
-    })();
-
-    return () => {
-      cancelled = true;
-      setPsStCluster1Busy(false);
-      setPsStCluster2Busy(false);
-      setPsStCluster3Busy(false);
-    };
-  }, [open, projectId, effectiveToken]);
+    }
+  };
 
   useEffect(() => {
     if (!open) return;
@@ -471,7 +493,7 @@ export default function AdvancedDashboard({ open, onClose, token, projectId }) {
   }, [open, playingBySensor, sensorData, indexBySensor]);
 
   useEffect(() => {
-    if (!open || !projectId) return undefined;
+    if (!open || !projectId || clientDashboardBlocked) return undefined;
     let cancelled = false;
     async function loadCurrentFrame(sensor) {
       const frame = frameFor(sensor);
@@ -506,10 +528,10 @@ export default function AdvancedDashboard({ open, onClose, token, projectId }) {
     return () => {
       cancelled = true;
     };
-  }, [open, projectId, sensorData, indexBySensor, dateIdxBySensor, loading, effectiveToken]);
+  }, [open, projectId, sensorData, indexBySensor, dateIdxBySensor, loading, effectiveToken, clientDashboardBlocked]);
 
   useEffect(() => {
-    if (!open || !projectId) return undefined;
+    if (!open || !projectId || clientDashboardBlocked) return undefined;
     let cancelled = false;
     async function loadRgbPreview(sensor) {
       const frame = frameFor(sensor);
@@ -606,7 +628,18 @@ export default function AdvancedDashboard({ open, onClose, token, projectId }) {
     return () => {
       cancelled = true;
     };
-  }, [open, projectId, sensorData, indexBySensor, dateIdxBySensor, recorteInventory, s1PrepSigmaItems, loading, effectiveToken]);
+  }, [
+    open,
+    projectId,
+    sensorData,
+    indexBySensor,
+    dateIdxBySensor,
+    recorteInventory,
+    s1PrepSigmaItems,
+    loading,
+    effectiveToken,
+    clientDashboardBlocked,
+  ]);
 
   useEffect(() => {
     if (!open) return;
@@ -636,7 +669,7 @@ export default function AdvancedDashboard({ open, onClose, token, projectId }) {
   );
 
   const runSoilPlus = async () => {
-    if (!projectId) return;
+    if (!projectId || clientDashboardBlocked) return;
     setSoilPlusBusy(true);
     setSoilPlusError("");
     try {
@@ -772,7 +805,7 @@ export default function AdvancedDashboard({ open, onClose, token, projectId }) {
 
   async function loadAllSeries(options = {}) {
     const { forceRefresh = false } = options;
-    if (!open || !projectId) return;
+    if (!open || !projectId || clientDashboardBlocked) return;
     setSeriesLoading(true);
     try {
       const [s1, s2, ps] = await Promise.all([
@@ -802,9 +835,9 @@ export default function AdvancedDashboard({ open, onClose, token, projectId }) {
   }
 
   useEffect(() => {
-    if (!open || !projectId || !sensorData.s1) return;
+    if (!open || !projectId || !sensorData.s1 || clientDashboardBlocked) return;
     void loadAllSeries();
-  }, [open, projectId, sensorData, effectiveToken]);
+  }, [open, projectId, sensorData, effectiveToken, clientDashboardBlocked]);
 
   const activeCluster = (clusterBySensor[sensorActive] || []).find((c) => c.key === selectedClusterKey[sensorActive]);
 
@@ -840,7 +873,11 @@ export default function AdvancedDashboard({ open, onClose, token, projectId }) {
         <div className="adv-dashboard-header">
           <h2>BioAgroMap -> Dashboard multisensor Espectral-Espacio-Temporal</h2>
           <div className="adv-dashboard-header-actions">
-            <button type="button" onClick={() => void loadAllSeries({ forceRefresh: true })} disabled={seriesLoading || loading}>
+            <button
+              type="button"
+              onClick={() => void loadAllSeries({ forceRefresh: true })}
+              disabled={clientDashboardBlocked || seriesLoading || loading}
+            >
               {seriesLoading ? "…" : "Actualizar series"}
             </button>
             <button type="button" className="adv-close-btn" onClick={onClose} aria-label="Cerrar">
@@ -851,7 +888,18 @@ export default function AdvancedDashboard({ open, onClose, token, projectId }) {
 
         {error ? <p className="adv-dashboard-error">{error}</p> : null}
 
-        <div className="adv-main-split">
+        {clientDashboardBlocked ? (
+          <div className="adv-dashboard-notice-pending" role="status" aria-live="polite">
+            <strong>Resultados no publicados</strong>
+            <span>
+              Su orden o proyecto aún no está en estado <strong>publicado</strong>. Cuando el administrador publique los
+              resultados, podrá ver aquí el dashboard completo (inventarios, series y mapas). El estado actual del proyecto
+              en la lista es: <strong>{String(projectStatus || "").trim() || "—"}</strong>.
+            </span>
+          </div>
+        ) : null}
+
+        <div className={`adv-main-split${clientDashboardBlocked ? " adv-main-split--blocked" : ""}`}>
           <div className="adv-timelapse-column">
             <div className="adv-timelapse-main">
               <div className="adv-sensor-tabs" role="tablist" aria-label="Sensor">
@@ -999,6 +1047,20 @@ export default function AdvancedDashboard({ open, onClose, token, projectId }) {
                 </div>
               </div>
               <section className="adv-smart-clusters-panel" aria-label="Clusters Smart">
+                <div className="cluster-actions-row">
+                  <button
+                    type="button"
+                    className="cluster-open-results-btn"
+                    onClick={() => void runSmartClusters()}
+                    disabled={
+                      clientDashboardBlocked || psStCluster1Busy || psStCluster2Busy || psStCluster3Busy
+                    }
+                  >
+                    {psStCluster1Busy || psStCluster2Busy || psStCluster3Busy
+                      ? "Generando clusters..."
+                      : "Generar clusters Smart"}
+                  </button>
+                </div>
                 <div className="adv-smart-clusters-grid">
                   <div className="adv-smart-cluster-cell">
                     <h4 className="adv-smart-cluster-heading">cluster Smart 1</h4>

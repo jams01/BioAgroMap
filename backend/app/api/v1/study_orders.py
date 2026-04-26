@@ -160,8 +160,10 @@ def create_study_order(
     if ds > de:
         raise HTTPException(status_code=400, detail="La fecha de inicio no puede ser posterior a la fecha final")
     geom = _normalize_geometry(payload.geometry)
-    # 1) creación automática de proyecto del cliente
-    project_name = f"Proyecto {user.email} {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}"
+    # 1) creación automática de proyecto del cliente (nombre elegido en la solicitud)
+    project_name = (payload.project_name or "").strip()
+    if not project_name:
+        raise HTTPException(status_code=422, detail="Indique un nombre para el proyecto")
     project = Project(
         name=project_name,
         owner_user_id=user.id,
@@ -185,12 +187,16 @@ def create_study_order(
         )
     )
     # 2) generación automática de orden asociada a proyecto
+    applicant_name = (payload.applicant_name or "").strip() or (user.full_name or "").strip() or user.email
+    applicant_phone = (payload.applicant_phone or "").strip() or (user.email or "")[:50]
+    if not applicant_phone:
+        applicant_phone = "—"
     row = StudyOrder(
         user_id=user.id,
         project_id=project.id,
         tenant_id=user.tenant_id,
-        applicant_name=payload.applicant_name.strip(),
-        applicant_phone=payload.applicant_phone.strip(),
+        applicant_name=applicant_name,
+        applicant_phone=applicant_phone,
         company=(payload.company or None),
         crop=(payload.crop or None),
         age_years=payload.age_years,
@@ -220,9 +226,10 @@ def create_study_order(
     yn = lambda b: "Sí" if b else "No"
     lines = [
         f"Nueva solicitud AgroGeoFísico #{row.id}",
+        f"Proyecto: {project.name} (id {project.id})",
         f"Correo del usuario: {user.email}",
         f"Solicitante: {row.applicant_name}",
-        f"Celular: {row.applicant_phone}",
+        f"Contacto (cuenta / celular): {row.applicant_phone}",
         f"Empresa: {row.company or '—'}",
         f"Fechas del estudio: {ds.isoformat()} → {de.isoformat()}",
         f"Cultivo: {row.crop or '—'}",
@@ -284,25 +291,44 @@ def patch_study_order_status(
     prev = o.status
     o.status = payload.status
     now = datetime.utcnow()
-    if payload.status == "en proceso":
-        o.assigned_admin_id = _admin.id
-        o.processing_started_at = now
+    if payload.status == "pendiente":
         if o.project_id:
             p = db.query(Project).filter(Project.id == o.project_id).first()
             if p:
-                p.status = "en proceso"
-                p.processing_started_at = now
-                p.processed_by_admin_id = _admin.id
+                p.status = "pendiente"
                 db.add(p)
-    if payload.status == "completado":
+    if payload.status == "procesado":
         o.assigned_admin_id = _admin.id
         o.processing_completed_at = now
+        if not o.processing_started_at:
+            o.processing_started_at = now
         if o.project_id:
             p = db.query(Project).filter(Project.id == o.project_id).first()
             if p:
                 p.status = "procesado"
+                if not p.processing_started_at:
+                    p.processing_started_at = now
                 p.processing_completed_at = now
                 p.processed_by_admin_id = _admin.id
+                db.add(p)
+    if payload.status == "publicado":
+        o.assigned_admin_id = _admin.id
+        if not o.processing_started_at:
+            o.processing_started_at = now
+        if not o.processing_completed_at:
+            o.processing_completed_at = now
+        if o.project_id:
+            p = db.query(Project).filter(Project.id == o.project_id).first()
+            if p:
+                p.status = "publicado"
+                if not p.processing_started_at:
+                    p.processing_started_at = now
+                if not p.processing_completed_at:
+                    p.processing_completed_at = now
+                if not p.published_at:
+                    p.published_at = now
+                p.processed_by_admin_id = _admin.id
+                p.approved_by_admin_id = _admin.id
                 db.add(p)
     if o.project_id:
         db.add(

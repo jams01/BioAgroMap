@@ -8,6 +8,7 @@ export default function StudyRequestModal({
   open,
   onClose,
   token,
+  onOrderSuccess,
   addMapLayer,
   paintLayerOnMap,
   mapRef,
@@ -25,8 +26,7 @@ export default function StudyRequestModal({
   const [successOrderId, setSuccessOrderId] = useState(null);
   const [mapHint, setMapHint] = useState("");
 
-  const [applicantName, setApplicantName] = useState("");
-  const [applicantPhone, setApplicantPhone] = useState("");
+  const [projectName, setProjectName] = useState("");
   const [studyDateStart, setStudyDateStart] = useState("");
   const [studyDateEnd, setStudyDateEnd] = useState("");
   const [company, setCompany] = useState("");
@@ -46,8 +46,7 @@ export default function StudyRequestModal({
     setMapHint("");
     setFileBusy(false);
     setSubmitBusy(false);
-    setApplicantName("");
-    setApplicantPhone("");
+    setProjectName("");
     setStudyDateStart("");
     setStudyDateEnd("");
     setCompany("");
@@ -163,8 +162,8 @@ export default function StudyRequestModal({
       setError("Primero debe definir el área del lote (paso 1).");
       return;
     }
-    if (!applicantName.trim() || !applicantPhone.trim() || !studyDateStart || !studyDateEnd) {
-      setError("Nombre, celular y ambas fechas son obligatorios.");
+    if (!projectName.trim() || !studyDateStart || !studyDateEnd) {
+      setError("Nombre del proyecto y ambas fechas del estudio son obligatorios.");
       return;
     }
     const cropVal = crop === "Otro" ? cropOther.trim() : crop.trim();
@@ -183,8 +182,7 @@ export default function StudyRequestModal({
       setAuthToken(token);
       const res = await api.post("/study-orders", {
         geometry,
-        applicant_name: applicantName.trim(),
-        applicant_phone: applicantPhone.trim(),
+        project_name: projectName.trim(),
         study_date_start: studyDateStart,
         study_date_end: studyDateEnd,
         company: company.trim() || null,
@@ -198,6 +196,7 @@ export default function StudyRequestModal({
       setSuccessOrderId(id != null ? Number(id) : null);
       setStep("success");
       setMessage?.("");
+      onOrderSuccess?.();
     } catch (err) {
       const d = err?.response?.data?.detail;
       setError(typeof d === "string" ? d : err?.message || "No se pudo enviar. Intente de nuevo.");
@@ -355,18 +354,26 @@ export default function StudyRequestModal({
                 )}
               </div>
               <p className="study-form-lead">
-                <strong>Paso 2 de 2.</strong> Datos de contacto y del cultivo. Los campos con <span className="req">*</span>{" "}
-                son obligatorios.
+                <strong>Paso 2 de 2.</strong> Nombre del nuevo proyecto, fechas del estudio y datos del cultivo. Los campos con{" "}
+                <span className="req">*</span> son obligatorios. Su nombre y correo de la cuenta se usarán como contacto.
               </p>
 
               <label>
-                Nombre completo <span className="req">*</span>
-                <input value={applicantName} onChange={(ev) => setApplicantName(ev.target.value)} required autoComplete="name" />
+                Nombre del proyecto <span className="req">*</span>
+                <input
+                  value={projectName}
+                  onChange={(ev) => setProjectName(ev.target.value)}
+                  required
+                  aria-required="true"
+                  maxLength={255}
+                  minLength={1}
+                  placeholder="Ej. Finca Norte 2026"
+                  autoComplete="off"
+                />
               </label>
-              <label>
-                Celular <span className="req">*</span>
-                <input value={applicantPhone} onChange={(ev) => setApplicantPhone(ev.target.value)} required autoComplete="tel" />
-              </label>
+              <p className="study-option-meta" style={{ marginTop: "-6px" }}>
+                Obligatorio: será el nombre del proyecto en el sistema (cada nueva solicitud puede tener un nombre distinto).
+              </p>
               <label>
                 Fecha de inicio del estudio <span className="req">*</span>
                 <input type="date" value={studyDateStart} onChange={(ev) => setStudyDateStart(ev.target.value)} required />
@@ -427,7 +434,11 @@ export default function StudyRequestModal({
                 <button type="button" className="btn-secondary" disabled={submitBusy} onClick={() => setStep("source")}>
                   Volver al paso 1
                 </button>
-                <button type="submit" className="study-btn-submit" disabled={submitBusy}>
+                <button
+                  type="submit"
+                  className="study-btn-submit"
+                  disabled={submitBusy || !projectName.trim() || !studyDateStart || !studyDateEnd}
+                >
                   {submitBusy ? (
                     <>
                       <span className="study-spinner study-spinner--inline" aria-hidden="true" />

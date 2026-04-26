@@ -105,7 +105,15 @@ class UpdateUserRoleRequest(BaseModel):
 
 
 class ProjectCreate(BaseModel):
-    name: str
+    name: str = Field(..., min_length=1, max_length=255, description="Nombre del proyecto (obligatorio)")
+
+    @field_validator("name")
+    @classmethod
+    def strip_project_name_create(cls, v: str) -> str:
+        s = (v or "").strip()
+        if not s:
+            raise ValueError("El nombre del proyecto es obligatorio")
+        return s
 
 
 class ProjectSummary(BaseModel):
@@ -126,7 +134,7 @@ class ProjectUpdate(BaseModel):
     def strip_name(cls, v: str) -> str:
         s = v.strip()
         if not s:
-            raise ValueError("Nombre vacío")
+            raise ValueError("El nombre del proyecto es obligatorio")
         return s
 
 
@@ -424,8 +432,17 @@ class VerifyOtpRegisterRequest(BaseModel):
 
 class StudyOrderCreate(BaseModel):
     geometry: dict = Field(..., description="GeoJSON Feature, FeatureCollection o Geometry")
-    applicant_name: str = Field(..., min_length=1, max_length=255)
-    applicant_phone: str = Field(..., min_length=5, max_length=50)
+    project_name: str = Field(..., min_length=1, max_length=255, description="Nombre del nuevo proyecto")
+    applicant_name: str | None = Field(
+        default=None,
+        max_length=255,
+        description="Opcional; si no se envía se usa el nombre de la cuenta",
+    )
+    applicant_phone: str | None = Field(
+        default=None,
+        max_length=50,
+        description="Opcional; si no se envía se usa el correo de la cuenta como contacto",
+    )
     study_date_start: str = Field(..., description="YYYY-MM-DD")
     study_date_end: str = Field(..., description="YYYY-MM-DD")
     company: str | None = None
@@ -434,6 +451,18 @@ class StudyOrderCreate(BaseModel):
     has_weather_data: bool = False
     has_soil_data: bool = False
     extra_notes: str | None = None
+
+    @field_validator("project_name", mode="before")
+    @classmethod
+    def project_name_obligatorio(cls, v):
+        if v is None:
+            raise ValueError("El nombre del proyecto es obligatorio")
+        if isinstance(v, str):
+            s = v.strip()
+            if not s:
+                raise ValueError("El nombre del proyecto es obligatorio")
+            return s
+        raise ValueError("El nombre del proyecto es obligatorio")
 
     @field_validator("applicant_name", "applicant_phone", "company", "crop", "extra_notes", mode="before")
     @classmethod
@@ -487,10 +516,8 @@ class StudyOrderStatusPatch(BaseModel):
     @classmethod
     def allowed_status(cls, v: str) -> str:
         s = v.strip().lower().replace("_", " ")
-        if s.replace(" ", "") == "enproceso" or s == "en proceso":
-            return "en proceso"
-        if s not in {"pendiente", "en proceso", "completado"}:
-            raise ValueError("Estado debe ser: pendiente, en proceso o completado")
+        if s not in {"pendiente", "procesado", "publicado"}:
+            raise ValueError("Estado debe ser: pendiente, procesado o publicado")
         return s
 
 

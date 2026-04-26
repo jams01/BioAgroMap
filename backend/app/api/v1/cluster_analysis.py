@@ -13,10 +13,10 @@ from rasterio.warp import reproject
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
-from app.api.deps import tenant_from_jwt
+from app.api.deps import get_current_user, require_project_dashboard_access, tenant_from_jwt
 from app.api.v1.helpers import _tenant_storage
 from app.db.session import get_db
-from app.models.models import Project
+from app.models.models import Project, User
 from app.schemas.schemas import ClusterElbowRequest, ClusterGmmRequest
 from app.services import satellite_clustering as sc
 from app.services.preprocess_pipeline_variant import (
@@ -182,21 +182,19 @@ def cluster_capabilities():
     }
 
 
-def _project_or_404(db: Session, project_id: int, tenant_id: int) -> Project:
-    project = db.query(Project).filter(Project.id == project_id, Project.tenant_id == tenant_id).first()
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
-    return project
+def _project_or_404(db: Session, user: User, project_id: int, tenant_id: int) -> Project:
+    return require_project_dashboard_access(db, user, tenant_id, project_id)
 
 
 @router.get("/cluster-analysis/datasets/{project_id}")
 def list_cluster_datasets(
     project_id: int,
     db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
     tenant_id: int = Depends(tenant_from_jwt),
     pipeline_variant: str = Depends(_cluster_pipeline_variant),
 ):
-    _project_or_404(db, project_id, tenant_id)
+    _project_or_404(db, user, project_id, tenant_id)
     if pipeline_variant == "s1":
         s1indices = _tenant_storage(tenant_id, project_id, "s1indices")
         datasets = sc.discover_s1_cluster_datasets(s1indices)
@@ -215,6 +213,7 @@ def list_cluster_datasets(
 def get_cluster_gmm_results(
     project_id: int,
     db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
     tenant_id: int = Depends(tenant_from_jwt),
     pipeline_variant: str = Depends(_cluster_pipeline_variant),
 ):
@@ -222,7 +221,7 @@ def get_cluster_gmm_results(
     Lista resultados GMM ya guardados en ``cluster_gmm/`` o ``ClusterPS/`` (misma forma que POST /gmm),
     regenerando las miniaturas PNG desde los GeoTIFF en disco.
     """
-    _project_or_404(db, project_id, tenant_id)
+    _project_or_404(db, user, project_id, tenant_id)
     out_dir = _tenant_storage(tenant_id, project_id, _cluster_out_dir_name(pipeline_variant))
     results = sc.load_cluster_gmm_results_from_storage(out_dir)
     return {
@@ -239,9 +238,10 @@ def get_cluster_gmm_results(
 def cluster_elbow(
     payload: ClusterElbowRequest,
     db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
     tenant_id: int = Depends(tenant_from_jwt),
 ):
-    _project_or_404(db, payload.project_id, tenant_id)
+    _project_or_404(db, user, payload.project_id, tenant_id)
     pv = _cluster_pipeline_variant(payload.pipeline_variant)
     if pv == "s1":
         s1indices = _tenant_storage(tenant_id, payload.project_id, "s1indices")
@@ -302,9 +302,10 @@ def cluster_elbow(
 def cluster_gmm(
     payload: ClusterGmmRequest,
     db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
     tenant_id: int = Depends(tenant_from_jwt),
 ):
-    _project_or_404(db, payload.project_id, tenant_id)
+    _project_or_404(db, user, payload.project_id, tenant_id)
     pv = _cluster_pipeline_variant(payload.pipeline_variant)
     if pv == "s1":
         s1indices = _tenant_storage(tenant_id, payload.project_id, "s1indices")

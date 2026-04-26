@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.security import create_token, decode_token
 from app.db.session import get_db
-from app.models.models import User
+from app.models.models import Project, StudyOrder, User
 
 bearer = HTTPBearer(auto_error=False)
 
@@ -81,3 +81,47 @@ def require_admin(user: User = Depends(get_current_user)) -> User:
     if str(user.role).lower() != "admin":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin role required")
     return user
+
+
+def assert_cliente_can_view_published_dashboard(db: Session, user: User, project: Project) -> None:
+    """Cliente solo ve datos de proyectos publicados y con vínculo (dueño u orden de estudio)."""
+    role = str(user.role or "").strip().lower()
+    if role != "cliente":
+        return
+    st = str(project.status or "").strip().lower()
+    if st != "publicado":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Los resultados de este proyecto no están publicados.",
+        )
+    owner_id = getattr(project, "owner_user_id", None)
+    if owner_id is not None and int(owner_id) == int(user.id):
+        return
+    linked = (
+        db.query(StudyOrder)
+        .filter(
+            StudyOrder.user_id == user.id,
+            StudyOrder.project_id == project.id,
+            StudyOrder.tenant_id == user.tenant_id,
+        )
+        .first()
+    )
+    if linked:
+        return
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="No tienes acceso a los resultados de este proyecto.",
+    )
+
+
+def require_project_dashboard_access(
+    db: Session,
+    user: User,
+    tenant_id: int,
+    project_id: int,
+) -> Project:
+    project = db.query(Project).filter(Project.id == project_id, Project.tenant_id == tenant_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    assert_cliente_can_view_published_dashboard(db, user, project)
+    return project

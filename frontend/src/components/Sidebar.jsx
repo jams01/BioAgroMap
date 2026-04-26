@@ -15,6 +15,12 @@ function isS1StackMode(mode) {
   );
 }
 
+function normalizeUserRole(role) {
+  const value = String(role || "").trim().toLowerCase();
+  if (value === "client") return "cliente";
+  return value;
+}
+
 export default function Sidebar({
   activeTab,
   setActiveTab,
@@ -122,8 +128,9 @@ export default function Sidebar({
     setLayersPanelOpen(false);
   }, [visualIndexGalleryKickPs]);
 
-  const isAdmin = !!token && userRole === "admin";
-  const isCliente = !!token && userRole === "cliente";
+  const normalizedRole = normalizeUserRole(userRole);
+  const isAdmin = !!token && normalizedRole === "admin";
+  const isCliente = !!token && normalizedRole === "cliente";
   const showStudyCta = !!token && isCliente;
   const canShowAdminTabs = isAdmin;
   const canShowClientDashboardTab = isCliente;
@@ -300,20 +307,37 @@ export default function Sidebar({
                 </button>
               ) : null}
               {isAdmin ? (
-                <ProjectList
-                  projects={projects}
-                  projectId={projectId}
-                  projectName={projectName}
-                  setProjectName={setProjectName}
-                  loading={loading}
-                  onSelectProject={onSelectProject}
-                  onCreateProject={onCreateProject}
-                  onUpdateProject={onUpdateProject}
-                  onDeleteProject={onDeleteProject}
-                  onLogout={onLogout}
-                  email={email}
-                  hideSessionHeader
-                />
+                <div className="admin-project-field">
+                  <label className="admin-project-label" htmlFor="admin-project-select">
+                    Proyecto de trabajo
+                  </label>
+                  <select
+                    id="admin-project-select"
+                    className="admin-project-select"
+                    value={
+                      projectId != null && projectId !== ""
+                        ? String(projectId)
+                        : ""
+                    }
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      if (v) onSelectProject(Number(v));
+                    }}
+                    disabled={loading || !projects?.length}
+                  >
+                    <option value="">— Elija proyecto —</option>
+                    {(projects || []).map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.name} ({p.status ?? "—"})
+                      </option>
+                    ))}
+                  </select>
+                  {!projects?.length ? (
+                    <p className="admin-project-hint">
+                      No hay proyectos. Los clientes crean proyectos al solicitar un estudio.
+                    </p>
+                  ) : null}
+                </div>
               ) : (
                 <div className="projects-empty">
                   Sesion iniciada como cliente. Usa el boton "Dashboard" para ver tus proyectos.
@@ -336,6 +360,15 @@ export default function Sidebar({
               Solicitar estudio AgroGeoFísico
             </button>
           ) : null}
+          <button
+            type="button"
+            className="layers-dashboard-btn"
+            onClick={() => onOpenClientDashboard?.()}
+            disabled={loading}
+            title="Abrir dashboard con resultados publicados"
+          >
+            Abrir dashboard de resultados
+          </button>
           <ProjectList
             projects={projects}
             projectId={projectId}

@@ -17,7 +17,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Respon
 from sklearn.cluster import KMeans
 from sqlalchemy.orm import Session
 
-from app.api.deps import tenant_from_jwt
+from app.api.deps import get_current_user, require_project_dashboard_access, tenant_from_jwt
 from app.api.v1.helpers import (
     _existing_raster_path,
     _get_project_raster,
@@ -41,7 +41,7 @@ from app.services.ps_spatiotemporal_cluster import (
 from app.services.raster_geo import render_raster_preview_png
 from app.core.config import settings
 from app.db.session import get_db
-from app.models.models import Layer, Project, RasterLayer
+from app.models.models import Layer, Project, RasterLayer, User
 from app.schemas.schemas import (
     ClusterRequest,
     CropRequest,
@@ -234,10 +234,13 @@ def _series_from_scene_dates(scene_dates: list[str], monthly_means: dict[str, di
 
 
 @router.post("/preprocess/download")
-def preprocess_download(payload: DownloadRequest, db: Session = Depends(get_db), tenant_id: int = Depends(tenant_from_jwt)):
-    project = db.query(Project).filter(Project.id == payload.project_id, Project.tenant_id == tenant_id).first()
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+def preprocess_download(
+    payload: DownloadRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+    tenant_id: int = Depends(tenant_from_jwt),
+):
+    project = require_project_dashboard_access(db, user, tenant_id, payload.project_id)
 
     if payload.source == "sentinel-2":
         if not settings.copernicus_user or not settings.copernicus_password:
@@ -329,6 +332,7 @@ async def preprocess_sentinel1_download(
     layer_id: str | None = Form(None),
     aoi_file: UploadFile | None = File(None),
     db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
     tenant_id: int = Depends(tenant_from_jwt),
 ):
     """
@@ -337,9 +341,7 @@ async def preprocess_sentinel1_download(
     """
     from datetime import date as date_cls
 
-    project = db.query(Project).filter(Project.id == project_id, Project.tenant_id == tenant_id).first()
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+    project = require_project_dashboard_access(db, user, tenant_id, project_id)
 
     if not settings.copernicus_user or not settings.copernicus_password:
         raise HTTPException(status_code=500, detail="Copernicus credentials not configured")
@@ -450,9 +452,11 @@ def sentinel_download_status(
     project_id: int,
     raster_id: int,
     db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
     tenant_id: int = Depends(tenant_from_jwt),
 ):
     """Poll Sentinel-2 download progress (Celery + DB metadata)."""
+    require_project_dashboard_access(db, user, tenant_id, project_id)
     from celery.result import AsyncResult
 
     from app.tasks.celery_app import celery_app
@@ -549,7 +553,13 @@ def sentinel_download_status(
 
 
 @router.post("/preprocess/crop")
-def preprocess_crop(payload: CropRequest, db: Session = Depends(get_db), tenant_id: int = Depends(tenant_from_jwt)):
+def preprocess_crop(
+    payload: CropRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+    tenant_id: int = Depends(tenant_from_jwt),
+):
+    require_project_dashboard_access(db, user, tenant_id, payload.project_id)
     raster = _get_project_raster(db, tenant_id, payload.project_id, payload.raster_layer_id)
     src_path = _existing_raster_path(raster)
     out_path = _tenant_storage(tenant_id, payload.project_id, "preprocess") / f"crop_{uuid.uuid4().hex}.tif"
@@ -618,15 +628,14 @@ def get_s1_prepoceso_sigma0_vv_inventory(
         description="Polarización: vv → Sigma0_VV_db.img, vh → Sigma0_VH_db.img",
     ),
     db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
     tenant_id: int = Depends(tenant_from_jwt),
 ):
     """
     Lista ``Sigma0_VV_db.img`` o ``Sigma0_VH_db.img`` bajo ``s1prepoceso/`` (SNAP/ENVI).
     ``sort_key`` en formato ISO (YYYY-MM-DD) extraído de ``..._S1?_IW_GRDH_1SDV_YYYYMMDDTh...`` en la ruta.
     """
-    project = db.query(Project).filter(Project.id == project_id, Project.tenant_id == tenant_id).first()
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+    project = require_project_dashboard_access(db, user, tenant_id, project_id)
 
     p = str(pol or "vv").strip().lower()
     if p not in _S1_PREP_SIGMA0_IMG:
@@ -673,12 +682,11 @@ def get_s1_prepoceso_sigma0_vv_preview(
         description="Paleta tipo JET/Spectral (matplotlib): spectral | jet | turbo",
     ),
     db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
     tenant_id: int = Depends(tenant_from_jwt),
 ):
     """PNG de una banda (sigma0 VV o VH en dB) desde ENVI en ``s1prepoceso/`` (paleta científica)."""
-    project = db.query(Project).filter(Project.id == project_id, Project.tenant_id == tenant_id).first()
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+    project = require_project_dashboard_access(db, user, tenant_id, project_id)
 
     p = str(pol or "vv").strip().lower()
     if p not in _S1_PREP_SIGMA0_IMG:
@@ -729,6 +737,7 @@ def get_s1_prepoceso_sigma0_vv_preview(
 def get_s1_prep_sar_scenes_inventory(
     project_id: int,
     db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
     tenant_id: int = Depends(tenant_from_jwt),
 ):
     """
@@ -737,9 +746,7 @@ def get_s1_prep_sar_scenes_inventory(
     """
     from app.services.s1_sar_indices import discover_s1_prep_sar_scenes
 
-    project = db.query(Project).filter(Project.id == project_id, Project.tenant_id == tenant_id).first()
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+    project = require_project_dashboard_access(db, user, tenant_id, project_id)
 
     root = _tenant_storage(tenant_id, project_id, "s1prepoceso")
     items = discover_s1_prep_sar_scenes(tenant_id, project_id)
@@ -750,6 +757,7 @@ def get_s1_prep_sar_scenes_inventory(
 def preprocess_s1_sar_index_stacks(
     payload: S1SarIndexStacksRequest,
     db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
     tenant_id: int = Depends(tenant_from_jwt),
 ):
     """
@@ -758,9 +766,7 @@ def preprocess_s1_sar_index_stacks(
     """
     from app.tasks.jobs import s1_sar_index_stacks_pipeline
 
-    project = db.query(Project).filter(Project.id == payload.project_id, Project.tenant_id == tenant_id).first()
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+    project = require_project_dashboard_access(db, user, tenant_id, payload.project_id)
 
     paths = [str(p).strip().replace("\\", "/") for p in payload.scene_vv_relpaths if str(p).strip()]
     paths = list(dict.fromkeys(paths))
@@ -787,6 +793,7 @@ def preprocess_s1_sar_index_stacks(
 def get_recortes_inventory(
     project_id: int,
     db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
     tenant_id: int = Depends(tenant_from_jwt),
     pipeline_variant: str = Depends(_pipeline_variant_query),
 ):
@@ -797,9 +804,7 @@ def get_recortes_inventory(
     """
     from app.services.s2_vegetation_indices import sort_key_from_path_or_meta
 
-    project = db.query(Project).filter(Project.id == project_id, Project.tenant_id == tenant_id).first()
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+    project = require_project_dashboard_access(db, user, tenant_id, project_id)
 
     rec_kind = recortes_dir_name(pipeline_variant)
     recortes_root = _tenant_storage(tenant_id, project_id, rec_kind)
@@ -987,15 +992,14 @@ def _soilplus_cluster_png(labels: np.ndarray, mask: np.ndarray, n_clusters: int)
 def get_ps_soilplus_f1_exact(
     project_id: int,
     db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
     tenant_id: int = Depends(tenant_from_jwt),
 ):
     """
     Calcula f1 exacto para Soil+ desde PlanetScope real:
     media global de la banda 8 en todos los GeoTIFF válidos de ``recortesPS/``.
     """
-    project = db.query(Project).filter(Project.id == project_id, Project.tenant_id == tenant_id).first()
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+    project = require_project_dashboard_access(db, user, tenant_id, project_id)
 
     rec_root = _tenant_storage(tenant_id, project_id, recortes_dir_name("ps"))
     if not rec_root.is_dir():
@@ -1061,15 +1065,14 @@ def get_soilplus_dem_input_stats(
     project_id: int,
     window_size: int = Query(13, ge=3, le=101, description="Tamaño de ventana para métrica CV local (impar recomendado)."),
     db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
     tenant_id: int = Depends(tenant_from_jwt),
 ):
     """
     Fuente de entrada fija para Soil+:
     data/storage/tenant_{tenant}/project_{project}/dem/band_1.img
     """
-    project = db.query(Project).filter(Project.id == project_id, Project.tenant_id == tenant_id).first()
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+    project = require_project_dashboard_access(db, user, tenant_id, project_id)
 
     try:
         dem_path, arr, mask = _load_soilplus_dem_band1(project_id, tenant_id)
@@ -1101,11 +1104,10 @@ def get_soilplus_dem_input_stats(
 def get_soilplus_dem_preview(
     project_id: int,
     db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
     tenant_id: int = Depends(tenant_from_jwt),
 ):
-    project = db.query(Project).filter(Project.id == project_id, Project.tenant_id == tenant_id).first()
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+    project = require_project_dashboard_access(db, user, tenant_id, project_id)
     dem_path, arr, mask = _load_soilplus_dem_band1(project_id, tenant_id)
     _ = dem_path
     png = _soilplus_png_from_array(arr, mask)
@@ -1117,11 +1119,10 @@ def get_soilplus_cv_preview(
     project_id: int,
     window_size: int = Query(13, ge=3, le=101),
     db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
     tenant_id: int = Depends(tenant_from_jwt),
 ):
-    project = db.query(Project).filter(Project.id == project_id, Project.tenant_id == tenant_id).first()
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+    project = require_project_dashboard_access(db, user, tenant_id, project_id)
     _, arr, mask = _load_soilplus_dem_band1(project_id, tenant_id)
     cv_w, _, _ws = _soilplus_compute_cv(arr, mask, window_size)
     png = _soilplus_png_from_array(cv_w, mask)
@@ -1135,11 +1136,10 @@ def get_soilplus_elbow(
     k_max: int = Query(10, ge=2, le=30),
     sample_max: int = Query(20000, ge=2000, le=120000),
     db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
     tenant_id: int = Depends(tenant_from_jwt),
 ):
-    project = db.query(Project).filter(Project.id == project_id, Project.tenant_id == tenant_id).first()
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+    project = require_project_dashboard_access(db, user, tenant_id, project_id)
     if k_max < k_min:
         raise HTTPException(status_code=400, detail="k_max debe ser >= k_min")
     _, arr, mask = _load_soilplus_dem_band1(project_id, tenant_id)
@@ -1185,11 +1185,10 @@ def get_soilplus_cluster_preview(
     n_clusters: int = Query(4, ge=2, le=30),
     sample_max: int = Query(20000, ge=2000, le=120000),
     db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
     tenant_id: int = Depends(tenant_from_jwt),
 ):
-    project = db.query(Project).filter(Project.id == project_id, Project.tenant_id == tenant_id).first()
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+    project = require_project_dashboard_access(db, user, tenant_id, project_id)
     _, arr, mask = _load_soilplus_dem_band1(project_id, tenant_id)
     x = arr[mask].reshape(-1, 1).astype(np.float64)
     n = x.shape[0]
@@ -1223,13 +1222,12 @@ def get_recorte_preview_disk(
         description="Solo basename en la raíz de recortes/ (compatibilidad). Usar query path si hay subcarpetas.",
     ),
     db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
     tenant_id: int = Depends(tenant_from_jwt),
     pipeline_variant: str = Depends(_pipeline_variant_query),
 ):
     """Vista RGB desde GeoTIFF en ``recortes/`` o ``recortesPS/``: S2 típico B04,B03,B02 → 3,2,1; Planet PS (≥6 bandas) → 6,4,2."""
-    project = db.query(Project).filter(Project.id == project_id, Project.tenant_id == tenant_id).first()
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+    project = require_project_dashboard_access(db, user, tenant_id, project_id)
 
     root = _tenant_storage(tenant_id, project_id, recortes_dir_name(pipeline_variant)).resolve()
 
@@ -1394,13 +1392,12 @@ def _canonical_index_dir_name(raw: str) -> str | None:
 def get_index_stacks_inventory(
     project_id: int,
     db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
     tenant_id: int = Depends(tenant_from_jwt),
     pipeline_variant: str = Depends(_pipeline_variant_query),
 ):
     """Lista GeoTIFF multibanda en ``indices/`` o ``indecesPS/`` (salida del pipeline de estimación, sin capas en BD)."""
-    project = db.query(Project).filter(Project.id == project_id, Project.tenant_id == tenant_id).first()
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+    project = require_project_dashboard_access(db, user, tenant_id, project_id)
 
     idx_kind = indices_dir_name(pipeline_variant)
     indices_root = _tenant_storage(tenant_id, project_id, idx_kind)
@@ -1476,13 +1473,12 @@ def get_index_stack_preview_disk(
         description="1 = paleta RdYlGn (galería «Visual índices»).",
     ),
     db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
     tenant_id: int = Depends(tenant_from_jwt),
     pipeline_variant: str = Depends(_pipeline_variant_query),
 ):
     """PNG de una banda de un stack de índices en disco (no requiere RasterLayer)."""
-    project = db.query(Project).filter(Project.id == project_id, Project.tenant_id == tenant_id).first()
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+    project = require_project_dashboard_access(db, user, tenant_id, project_id)
 
     if stack_relpath is None or not str(stack_relpath).strip():
         raise HTTPException(status_code=400, detail="Indica path")
@@ -1529,14 +1525,13 @@ def get_index_stack_preview_disk(
 def get_s1_sar_index_stacks_inventory(
     project_id: int,
     db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
     tenant_id: int = Depends(tenant_from_jwt),
 ):
     """Lista GeoTIFF multibanda en ``s1indices/<INDICE>/`` (stacks SAR por escena)."""
     from app.services.s1_sar_indices import S1_SAR_STACKS_ROOT_NAME
 
-    project = db.query(Project).filter(Project.id == project_id, Project.tenant_id == tenant_id).first()
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+    project = require_project_dashboard_access(db, user, tenant_id, project_id)
 
     root = _tenant_storage(tenant_id, project_id, S1_SAR_STACKS_ROOT_NAME)
     if not root.is_dir():
@@ -1606,14 +1601,13 @@ def get_s1_sar_index_stack_preview_disk(
         description="1 = paleta RdYlGn (galería «Visual índices SAR»).",
     ),
     db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
     tenant_id: int = Depends(tenant_from_jwt),
 ):
     """PNG de una banda de un stack de índices SAR en ``s1indices/``."""
     from app.services.s1_sar_indices import S1_SAR_STACKS_ROOT_NAME
 
-    project = db.query(Project).filter(Project.id == project_id, Project.tenant_id == tenant_id).first()
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+    project = require_project_dashboard_access(db, user, tenant_id, project_id)
 
     if stack_relpath is None or not str(stack_relpath).strip():
         raise HTTPException(status_code=400, detail="Indica path")
@@ -1660,6 +1654,7 @@ def get_s1_sar_index_stack_preview_disk(
 def preprocess_s2_index_stacks(
     payload: S2IndexStacksRequest,
     db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
     tenant_id: int = Depends(tenant_from_jwt),
 ):
     """
@@ -1669,9 +1664,7 @@ def preprocess_s2_index_stacks(
     from app.services.s2_vegetation_indices import normalize_requested_indices
     from app.tasks.jobs import s2_index_stacks_pipeline
 
-    project = db.query(Project).filter(Project.id == payload.project_id, Project.tenant_id == tenant_id).first()
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+    project = require_project_dashboard_access(db, user, tenant_id, payload.project_id)
 
     pairs = normalize_requested_indices(
         payload.indices, pipeline_variant=normalize_pipeline_variant(payload.pipeline_variant)
@@ -1787,6 +1780,7 @@ def _roi_mask_from_selection(roi_selection: RoiSelectionNormalized, h: int, w: i
 def preprocess_vegetation_time_series(
     payload: VegetationTimeSeriesRequest,
     db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
     tenant_id: int = Depends(tenant_from_jwt),
 ):
     """
@@ -1803,9 +1797,7 @@ def preprocess_vegetation_time_series(
         sort_key_from_raster_layer,
     )
 
-    project = db.query(Project).filter(Project.id == payload.project_id, Project.tenant_id == tenant_id).first()
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+    project = require_project_dashboard_access(db, user, tenant_id, payload.project_id)
 
     pv = normalize_pipeline_variant(payload.pipeline_variant)
     index_list_s2 = ("NDVI", "EVI", "NDWI", "CIre", "MCARI")
@@ -1972,6 +1964,7 @@ def preprocess_vegetation_time_series(
 def preprocess_s1_sar_time_series(
     payload: S1SarTimeSeriesRequest,
     db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
     tenant_id: int = Depends(tenant_from_jwt),
 ):
     """
@@ -1986,9 +1979,7 @@ def preprocess_s1_sar_time_series(
         sample_pixel_series_from_stacks,
     )
 
-    project = db.query(Project).filter(Project.id == payload.project_id, Project.tenant_id == tenant_id).first()
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+    project = require_project_dashboard_access(db, user, tenant_id, payload.project_id)
 
     stacks = discover_primary_s1_sar_stacks(tenant_id, payload.project_id)
     if len(stacks) < len(S1_SAR_INDEX_KEYS):
@@ -2105,6 +2096,7 @@ def preprocess_s1_sar_time_series(
 def preprocess_agroclimate_series(
     project_id: int = Query(..., ge=1),
     db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
     tenant_id: int = Depends(tenant_from_jwt),
 ):
     """
@@ -2117,9 +2109,7 @@ def preprocess_agroclimate_series(
 
     from app.services.project_geometry import wkt_union_from_project_layers
 
-    project = db.query(Project).filter(Project.id == project_id, Project.tenant_id == tenant_id).first()
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+    project = require_project_dashboard_access(db, user, tenant_id, project_id)
 
     wkt = wkt_union_from_project_layers(db, project_id, tenant_id, None)
     if not wkt:
@@ -2256,6 +2246,7 @@ def preprocess_cluster(
 def preprocess_sentinel1_recortes(
     payload: S1GrdRecorteRequest,
     db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
     tenant_id: int = Depends(tenant_from_jwt),
 ):
     """
@@ -2264,9 +2255,7 @@ def preprocess_sentinel1_recortes(
     """
     from app.tasks.jobs import s1_grd_recortes_pipeline
 
-    project = db.query(Project).filter(Project.id == payload.project_id, Project.tenant_id == tenant_id).first()
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+    project = require_project_dashboard_access(db, user, tenant_id, payload.project_id)
 
     if payload.layer_id is not None:
         found = (
@@ -2312,6 +2301,7 @@ def preprocess_sentinel1_recortes(
 def preprocess_ps_planetscope_zip_extract(
     payload: PsPlanetZipExtractRequest,
     db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
     tenant_id: int = Depends(tenant_from_jwt),
 ):
     """
@@ -2321,9 +2311,7 @@ def preprocess_ps_planetscope_zip_extract(
     """
     from app.tasks.jobs import ps_planet_zip_extract_pipeline
 
-    project = db.query(Project).filter(Project.id == payload.project_id, Project.tenant_id == tenant_id).first()
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+    project = require_project_dashboard_access(db, user, tenant_id, payload.project_id)
 
     try:
         async_result = ps_planet_zip_extract_pipeline.delay(tenant_id, payload.project_id)
@@ -2339,6 +2327,7 @@ def preprocess_ps_planetscope_zip_extract(
 def preprocess_s2_l2a_recortes(
     payload: S2L2aRecorteRequest,
     db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
     tenant_id: int = Depends(tenant_from_jwt),
 ):
     """
@@ -2349,9 +2338,7 @@ def preprocess_s2_l2a_recortes(
     from app.services.project_geometry import wkt_union_from_project_layers
     from app.tasks.jobs import s2_l2a_recortes_pipeline
 
-    project = db.query(Project).filter(Project.id == payload.project_id, Project.tenant_id == tenant_id).first()
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+    project = require_project_dashboard_access(db, user, tenant_id, payload.project_id)
 
     if payload.layer_id is not None:
         found = (
@@ -2427,6 +2414,7 @@ def preprocess_task_status(task_id: str):
 def ps_spatiotemporal_cluster_run(
     project_id: int,
     db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
     tenant_id: int = Depends(tenant_from_jwt),
     preset: str = Query(
         "smart1",
@@ -2443,9 +2431,7 @@ def ps_spatiotemporal_cluster_run(
     ``preset=smart2``: EVI (mean/std/min), NDRE_mean, NDWI_mean/std, VARI_mean.
     ``preset=smart3``: KNDVI (mean/std/min), MCARI_mean, NDWI_mean/std, VARI_mean.
     """
-    project = db.query(Project).filter(Project.id == project_id, Project.tenant_id == tenant_id).first()
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+    project = require_project_dashboard_access(db, user, tenant_id, project_id)
     try:
         pr = get_preset(preset)
     except ValueError as exc:
@@ -2473,12 +2459,11 @@ def ps_spatiotemporal_cluster_run(
 def ps_spatiotemporal_cluster_status(
     project_id: int,
     db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
     tenant_id: int = Depends(tenant_from_jwt),
     preset: str = Query("smart1", description="smart1, smart2 o smart3"),
 ):
-    project = db.query(Project).filter(Project.id == project_id, Project.tenant_id == tenant_id).first()
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+    project = require_project_dashboard_access(db, user, tenant_id, project_id)
     try:
         pr = get_preset(preset)
     except ValueError as exc:
@@ -2496,13 +2481,12 @@ def ps_spatiotemporal_cluster_status(
 def ps_spatiotemporal_cluster_preview(
     project_id: int,
     db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
     tenant_id: int = Depends(tenant_from_jwt),
     preset: str = Query("smart1", description="smart1, smart2 o smart3"),
 ):
     """PNG del mapa de clusters (colores discretos)."""
-    project = db.query(Project).filter(Project.id == project_id, Project.tenant_id == tenant_id).first()
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+    project = require_project_dashboard_access(db, user, tenant_id, project_id)
     try:
         pr = get_preset(preset)
     except ValueError as exc:

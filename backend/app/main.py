@@ -63,6 +63,13 @@ def _is_cliente_allowed_request(request: Request) -> bool:
         path.startswith(f"{settings.api_v1_prefix}/projects")
         or path.startswith(f"{settings.api_v1_prefix}/layers")
         or path.startswith(f"{settings.api_v1_prefix}/raster")
+        or path.startswith(f"{settings.api_v1_prefix}/preprocess/")
+        or path.startswith(f"{settings.api_v1_prefix}/cluster-analysis/")
+    ):
+        return True
+    if method == "POST" and path in (
+        f"{settings.api_v1_prefix}/preprocess/vegetation-time-series",
+        f"{settings.api_v1_prefix}/preprocess/s1-sar-time-series",
     ):
         return True
     return False

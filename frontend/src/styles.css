@@ -934,6 +934,45 @@ body {
   font-weight: 500;
 }
 
+.admin-project-field {
+  margin-top: 10px;
+  padding: 10px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  background: #fafbfc;
+}
+
+.admin-project-label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: #333;
+  margin-bottom: 6px;
+}
+
+.admin-project-select {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  font-size: 13px;
+  border: 1px solid #ccc;
+  border-radius: 6px;
+  background: #fff;
+  color: #222;
+}
+
+.admin-project-select:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+}
+
+.admin-project-hint {
+  margin: 8px 0 0;
+  font-size: 11px;
+  color: #666;
+  line-height: 1.35;
+}
+
 .projects-section {
   border: 1px solid #ddd;
   border-radius: 6px;
@@ -987,11 +1026,55 @@ body {
   color: #1a3f8c;
 }
 
+.projects-item-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+
 .projects-item-name {
   flex: 1;
+  min-width: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.projects-item-status {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 3px 8px;
+  border-radius: 999px;
+  line-height: 1.2;
+  letter-spacing: 0.02em;
+}
+
+.projects-item-status--pendiente {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.projects-item-status--procesado {
+  background: #dbeafe;
+  color: #1e40af;
+}
+
+.projects-item-status--publicado {
+  background: #d1fae5;
+  color: #065f46;
+}
+
+.projects-item-status--en-proceso {
+  background: #e0e7ff;
+  color: #3730a3;
+}
+
+.projects-item-status--unknown {
+  background: #f3f4f6;
+  color: #4b5563;
 }
 
 .projects-item-check {
@@ -1082,8 +1165,8 @@ body {
 }
 
 .user-mgmt-modal {
-  max-width: min(1500px, 99vw);
-  width: min(1500px, 99vw);
+  max-width: min(600px, 95vw);
+  width: min(600px, 95vw);
   max-height: 92vh;
   display: flex;
   flex-direction: column;
@@ -1460,6 +1543,8 @@ body {
 
 .study-modal-overlay--drawing .study-modal-backdrop {
   background: rgba(4, 120, 87, 0.08);
+  /* Dejar pasar los clics al mapa (MapLibre) bajo el overlay; si no, el backdrop los captura. */
+  pointer-events: none;
 }
 
 .study-modal-header {
@@ -1915,8 +2000,8 @@ body {
 }
 
 .orders-modal {
-  max-width: min(1700px, 99.5vw);
-  width: min(1700px, 99.5vw);
+  max-width: min(680px, 95vw);
+  width: min(680px, 95vw);
   max-height: 94vh;
   display: flex;
   flex-direction: column;
@@ -1924,6 +2009,64 @@ body {
 
 .orders-toolbar {
   margin-bottom: 10px;
+}
+
+.orders-modal-title {
+  font-size: 1rem;
+  font-weight: 500;
+  line-height: 1.35;
+}
+
+.orders-head-id,
+.orders-head-project {
+  font-weight: 700;
+}
+
+.orders-head-sep {
+  font-weight: 400;
+  color: #6b7280;
+}
+
+.orders-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.orders-group {
+  margin: 0;
+}
+
+.orders-group-user {
+  margin: 0 0 8px;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #374151;
+  background: #eef2ff;
+  border-radius: 6px;
+  border: 1px solid #e0e7ff;
+}
+
+.orders-row-text {
+  min-width: 0;
+  flex: 1;
+}
+
+.orders-row-primary {
+  font-size: 14px;
+  line-height: 1.35;
+  color: #111827;
+}
+
+.orders-order-id,
+.orders-project-name {
+  font-weight: 700;
+}
+
+.orders-primary-sep {
+  font-weight: 400;
+  color: #9ca3af;
 }
 
 .orders-list {
@@ -2443,16 +2586,16 @@ body {
 
 /* Modales amplios: gestión de usuarios / órdenes */
 .index-modal.user-mgmt-modal {
-  max-width: min(1500px, 99vw);
-  width: min(1500px, 99vw);
+  max-width: min(600px, 95vw);
+  width: min(600px, 95vw);
   max-height: 92vh;
   display: flex;
   flex-direction: column;
 }
 
 .index-modal.user-mgmt-modal.orders-modal {
-  max-width: min(1700px, 99.5vw);
-  width: min(1700px, 99.5vw);
+  max-width: min(680px, 95vw);
+  width: min(680px, 95vw);
   max-height: 94vh;
   display: flex;
   flex-direction: column;
@@ -3312,6 +3455,30 @@ body {
 
 .adv-dashboard-error {
   color: #b00020;
+}
+
+.adv-dashboard-notice-pending {
+  margin: 0 0 12px;
+  padding: 12px 14px;
+  background: #fffbeb;
+  border: 1px solid #f59e0b;
+  border-radius: 8px;
+  color: #78350f;
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.adv-dashboard-notice-pending strong {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 15px;
+  color: #92400e;
+}
+
+.adv-main-split--blocked {
+  opacity: 0.5;
+  pointer-events: none;
+  user-select: none;
 }
 
 .adv-main-split {
