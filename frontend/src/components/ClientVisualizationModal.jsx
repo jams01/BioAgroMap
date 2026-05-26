@@ -87,6 +87,7 @@ export default function ClientVisualizationModal({
   onClose,
   token,
   projectId,
+  projectName = "",
   onStatusMessage,
 }) {
   const [s1Mode, setS1Mode] = useState("visual-s1-vv");
@@ -296,6 +297,7 @@ export default function ClientVisualizationModal({
         projectId={projectId}
         token={token}
         pipelineVariant={galleryPipelineVariant}
+        projectName={projectName}
       />
 
       {clusterOpen ? (

@@ -226,6 +226,7 @@ function partitionOtherTopLevelForL2a(otherTopLevel) {
 export default function PreprocessPanel({
   token,
   projectId,
+  projectName = "",
   loading,
   stackMode,
   setStackMode,
@@ -1227,6 +1228,7 @@ export default function PreprocessPanel({
       <RgbTimeSeriesGallery
         open={galleryOpen}
         mode={galleryMode}
+        projectName={projectName}
         galleryVisualMode={
           galleryMode !== "view"
             ? "rgb"

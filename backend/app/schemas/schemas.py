@@ -126,6 +126,23 @@ class ProjectSummary(BaseModel):
     published_at: str | None = None
 
 
+class ProjectShareCreate(BaseModel):
+    email: EmailStr
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, v: str) -> str:
+        return str(v).strip().lower()
+
+
+class ProjectShareEntry(BaseModel):
+    user_id: int
+    email: str
+    full_name: str = ""
+    granted_by_email: str | None = None
+    created_at: str | None = None
+
+
 class ProjectUpdate(BaseModel):
     name: str = Field(..., min_length=1, max_length=255)
 

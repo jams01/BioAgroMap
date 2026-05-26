@@ -83,6 +83,17 @@ ALTER TABLE study_orders ADD COLUMN IF NOT EXISTS assigned_admin_id INT REFERENC
 ALTER TABLE study_orders ADD COLUMN IF NOT EXISTS processing_started_at TIMESTAMP;
 ALTER TABLE study_orders ADD COLUMN IF NOT EXISTS processing_completed_at TIMESTAMP;
 
+CREATE TABLE IF NOT EXISTS project_shares (
+    id SERIAL PRIMARY KEY,
+    project_id INT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    granted_by_user_id INT REFERENCES users(id) ON DELETE SET NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    UNIQUE (project_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_project_shares_user ON project_shares (user_id);
+CREATE INDEX IF NOT EXISTS idx_project_shares_project ON project_shares (project_id);
+
 CREATE TABLE IF NOT EXISTS project_processing_log (
     id SERIAL PRIMARY KEY,
     project_id INT NOT NULL REFERENCES projects(id),

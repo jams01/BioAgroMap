@@ -11,11 +11,32 @@ from app.api.deps import get_current_user, require_admin, tenant_from_jwt
 from app.core.order_email import send_study_order_notification
 from app.core.config import settings
 from app.db.session import get_db
-from app.models.models import AIResult, Layer, Project, ProjectProcessingLog, RasterLayer, StudyOrder, User
+from app.models.models import AIResult, Layer, Project, ProjectProcessingLog, ProjectShare, RasterLayer, StudyOrder, User
 from app.api.v1.helpers import project_downloads_slug
-from app.schemas.schemas import ProcessingLogCreate, ProcessingLogEntry, ProjectCreate, ProjectStatusPatch, ProjectSummary, ProjectUpdate
+from app.schemas.schemas import (
+    ProcessingLogCreate,
+    ProcessingLogEntry,
+    ProjectCreate,
+    ProjectShareCreate,
+    ProjectShareEntry,
+    ProjectStatusPatch,
+    ProjectSummary,
+    ProjectUpdate,
+)
 
 router = APIRouter()
+
+
+def _share_entry(db: Session, row: ProjectShare) -> dict:
+    user = db.query(User).filter(User.id == row.user_id).first()
+    granter = db.query(User).filter(User.id == row.granted_by_user_id).first() if row.granted_by_user_id else None
+    return {
+        "user_id": row.user_id,
+        "email": user.email if user else "",
+        "full_name": (user.full_name or "") if user else "",
+        "granted_by_email": granter.email if granter else None,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+    }
 
 
 def _rewrite_raster_paths_after_downloads_move(
@@ -80,12 +101,14 @@ def list_projects(db: Session = Depends(get_db), user: User = Depends(get_curren
                 StudyOrder.project_id.isnot(None),
             )
         )
-        # Todos los proyectos del cliente (dueño o vinculados por orden), con cualquier estado;
+        shared_project_ids = db.query(ProjectShare.project_id).filter(ProjectShare.user_id == user.id)
+        # Todos los proyectos del cliente (dueño, orden de estudio o compartido por admin), con cualquier estado;
         # el estado se muestra en UI; el acceso a resultados publicados sigue filtrado en otros endpoints.
         q = q.filter(
             or_(
                 Project.owner_user_id == user.id,
                 Project.id.in_(linked_order_projects),
+                Project.id.in_(shared_project_ids),
             ),
         )
     projects = q.order_by(Project.id.desc()).all()
@@ -104,6 +127,90 @@ def list_projects(db: Session = Depends(get_db), user: User = Depends(get_curren
             }
         )
     return out
+
+
+@router.get("/projects/{project_id}/shares", response_model=list[ProjectShareEntry])
+def list_project_shares(
+    project_id: int,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(tenant_from_jwt),
+    _admin: User = Depends(require_admin),
+):
+    project = db.query(Project).filter(Project.id == project_id, Project.tenant_id == tenant_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    rows = (
+        db.query(ProjectShare)
+        .filter(ProjectShare.project_id == project_id)
+        .order_by(ProjectShare.created_at.asc())
+        .all()
+    )
+    return [_share_entry(db, r) for r in rows]
+
+
+@router.post("/projects/{project_id}/shares", response_model=ProjectShareEntry)
+def share_project_with_user(
+    project_id: int,
+    payload: ProjectShareCreate,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(tenant_from_jwt),
+    admin: User = Depends(require_admin),
+):
+    project = db.query(Project).filter(Project.id == project_id, Project.tenant_id == tenant_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    email = str(payload.email).strip().lower()
+    target = db.query(User).filter(User.email == email).first()
+    if not target:
+        raise HTTPException(status_code=404, detail="No existe un usuario con ese correo")
+    if target.tenant_id != tenant_id:
+        raise HTTPException(status_code=400, detail="El usuario debe pertenecer al mismo tenant que el proyecto")
+    if not getattr(target, "is_active", True):
+        raise HTTPException(status_code=400, detail="El usuario está inactivo")
+    if str(target.role).lower() != "cliente":
+        raise HTTPException(status_code=400, detail="Solo se puede compartir con usuarios de rol cliente")
+    owner_id = getattr(project, "owner_user_id", None)
+    if owner_id is not None and int(owner_id) == int(target.id):
+        raise HTTPException(status_code=400, detail="Ese usuario ya es el dueño del proyecto")
+    existing = (
+        db.query(ProjectShare)
+        .filter(ProjectShare.project_id == project_id, ProjectShare.user_id == target.id)
+        .first()
+    )
+    if existing:
+        return _share_entry(db, existing)
+    row = ProjectShare(
+        project_id=project_id,
+        user_id=target.id,
+        granted_by_user_id=admin.id,
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return _share_entry(db, row)
+
+
+@router.delete("/projects/{project_id}/shares/{user_id}")
+def revoke_project_share(
+    project_id: int,
+    user_id: int,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(tenant_from_jwt),
+    _admin: User = Depends(require_admin),
+):
+    project = db.query(Project).filter(Project.id == project_id, Project.tenant_id == tenant_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    row = (
+        db.query(ProjectShare)
+        .filter(ProjectShare.project_id == project_id, ProjectShare.user_id == user_id)
+        .first()
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Compartido no encontrado")
+    db.delete(row)
+    db.commit()
+    return {"status": "ok", "project_id": project_id, "user_id": user_id}
 
 
 @router.patch("/projects/{project_id}")

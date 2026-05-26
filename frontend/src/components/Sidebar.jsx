@@ -67,6 +67,7 @@ export default function Sidebar({
   onResetEmailStep,
   onOpenStudyRequest,
   onOpenStudyOrders,
+  onOpenShareProject,
   onSelectProject,
   onCreateProject,
   onUpdateProject,
@@ -359,6 +360,19 @@ export default function Sidebar({
                       No hay proyectos. Los clientes crean proyectos al solicitar un estudio.
                     </p>
                   ) : null}
+                  <button
+                    type="button"
+                    className="layers-dashboard-btn share-project-btn"
+                    onClick={() => onOpenShareProject?.()}
+                    disabled={loading || !projectId}
+                    title={
+                      projectId
+                        ? "Dar acceso de lectura a otro usuario cliente"
+                        : "Seleccione un proyecto primero"
+                    }
+                  >
+                    Compartir proyecto con usuario
+                  </button>
                 </div>
               ) : (
                 <div className="projects-empty">
@@ -422,6 +436,7 @@ export default function Sidebar({
         <Sentinel1Panel
           token={token}
           projectId={projectId}
+          projectName={projectName}
           loading={loading}
           mapLayers={mapLayers}
           recorteLayerId={recorteLayerId}
@@ -471,6 +486,7 @@ export default function Sidebar({
         <PreprocessPanel
           token={token}
           projectId={projectId}
+          projectName={projectName}
           loading={loading}
           selectedIndices={selectedIndices}
           setSelectedIndices={setSelectedIndices}
@@ -501,6 +517,7 @@ export default function Sidebar({
         <PreprocessPanel
           token={token}
           projectId={projectId}
+          projectName={projectName}
           loading={loading}
           selectedIndices={selectedIndices}
           setSelectedIndices={setSelectedIndices}

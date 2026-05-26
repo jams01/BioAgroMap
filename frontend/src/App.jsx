@@ -23,6 +23,7 @@ import SmartSoilModal from "./components/dashboard/SmartSoilModal";
 import UserManagementModal from "./components/UserManagementModal";
 import StudyRequestModal from "./components/StudyRequestModal";
 import AdminStudyOrdersModal from "./components/AdminStudyOrdersModal";
+import ShareProjectModal from "./components/ShareProjectModal";
 import ClientVisualizationModal from "./components/ClientVisualizationModal";
 import { INDEX_CATALOG, INDEX_CATALOG_PS } from "./components/PreprocessPanel";
 
@@ -99,6 +100,7 @@ export default function App() {
   const [otpDebug, setOtpDebug] = useState(null);
   const [studyRequestOpen, setStudyRequestOpen] = useState(false);
   const [studyOrdersOpen, setStudyOrdersOpen] = useState(false);
+  const [shareProjectOpen, setShareProjectOpen] = useState(false);
   const [clientVizModalOpen, setClientVizModalOpen] = useState(false);
   const [smartFocus, setSmartFocus] = useState("cluster");
   const [studyDraw, setStudyDraw] = useState(null);
@@ -1547,6 +1549,17 @@ export default function App() {
           }
           setStudyOrdersOpen(true);
         }}
+        onOpenShareProject={() => {
+          if (!isAdmin) {
+            setMessage("Solo administradores.");
+            return;
+          }
+          if (!projectId) {
+            setMessage("Seleccione un proyecto en la lista antes de compartir.");
+            return;
+          }
+          setShareProjectOpen(true);
+        }}
         authStep={authStep}
         otpDebug={otpDebug}
         onContinueEmail={continueEmailFlow}
@@ -1628,6 +1641,7 @@ export default function App() {
         onClose={() => setClientVizModalOpen(false)}
         token={token}
         projectId={projectId}
+        projectName={dashboardProjectName}
         onStatusMessage={setMessage}
       />
       <UserManagementModal
@@ -1659,6 +1673,14 @@ export default function App() {
         open={studyOrdersOpen && isAdmin}
         token={token}
         onClose={() => setStudyOrdersOpen(false)}
+        onStatusMessage={(msg) => setMessage(msg)}
+      />
+      <ShareProjectModal
+        open={shareProjectOpen && isAdmin && !!token && !!projectId}
+        token={token}
+        projectId={projectId}
+        projectName={dashboardProjectName}
+        onClose={() => setShareProjectOpen(false)}
         onStatusMessage={(msg) => setMessage(msg)}
       />
     </div>

@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.security import create_token, decode_token
 from app.db.session import get_db
-from app.models.models import Project, StudyOrder, User
+from app.models.models import Project, ProjectShare, StudyOrder, User
 
 bearer = HTTPBearer(auto_error=False)
 
@@ -107,6 +107,16 @@ def assert_cliente_can_view_published_dashboard(db: Session, user: User, project
         .first()
     )
     if linked:
+        return
+    shared = (
+        db.query(ProjectShare)
+        .filter(
+            ProjectShare.user_id == user.id,
+            ProjectShare.project_id == project.id,
+        )
+        .first()
+    )
+    if shared:
         return
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,

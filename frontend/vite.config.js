@@ -10,7 +10,7 @@ export default defineConfig({
   server: {
     host: "0.0.0.0",
     port: 5173,
-    allowedHosts: ['tested-benz-cruises-donations.trycloudflare.com'],// Volúmen ./frontend:/app: asegura HMR cuando el host no propaga inotify al contenedor.,
+    allowedHosts: ['campbell-monitoring-perhaps-thoughts.trycloudflare.com'],// Volúmen ./frontend:/app: asegura HMR cuando el host no propaga inotify al contenedor.,
     watch: {
       usePolling: true,
       interval: 800,

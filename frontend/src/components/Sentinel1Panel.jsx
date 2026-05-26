@@ -48,6 +48,7 @@ function formatFileSize(bytes) {
 export default function Sentinel1Panel({
   token,
   projectId,
+  projectName = "",
   loading,
   mapLayers,
   recorteLayerId,
@@ -738,6 +739,7 @@ export default function Sentinel1Panel({
         open={s1GalleryKind !== null || s1ClusterPickerOpen}
         mode={s1ClusterPickerOpen ? "s1SarTimeSeriesSelect" : s1GalleryKind === "ts" ? "s1SarTimeSeriesSelect" : "s1SarIndexSelect"}
         galleryVisualMode="rgb"
+        projectName={projectName}
         indexCatalog={S1_SAR_INDEX_CATALOG}
         selectedIndices={selectedS1SarIndices}
         onSelectedIndicesChange={setSelectedS1SarIndices}

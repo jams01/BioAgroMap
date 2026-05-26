@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import api, { API_URL, formatApiErrorDetail, setAuthToken } from "../api";
 import {
   formatRecorteDisplayName,
@@ -195,6 +195,183 @@ const ZOOM_MIN = 0.35;
 const ZOOM_MAX = 4;
 const ZOOM_STEP = 0.1;
 
+function loadImageElement(src) {
+  return new Promise((resolve, reject) => {
+    if (!src || src.startsWith("data:image/svg")) {
+      reject(new Error("skip"));
+      return;
+    }
+    const im = new Image();
+    im.onload = () => resolve(im);
+    im.onerror = () => reject(new Error("load"));
+    im.decoding = "async";
+    im.src = src;
+  });
+}
+
+function parseIsoFromGalleryItem(item) {
+  const raw = item?.raw;
+  if (raw && typeof raw.sort_key === "string") {
+    const head = raw.sort_key.slice(0, 10);
+    if (/^\d{4}-\d{2}-\d{2}$/.test(head)) return head;
+  }
+  if (raw && typeof raw === "object" && raw.metadata) {
+    const sk = raw.metadata.s2_sort_key;
+    if (typeof sk === "string" && /^\d{4}-\d{2}-\d{2}$/.test(sk)) return sk;
+  }
+  const lbl = String(item?.label || "");
+  const ps = lbl.match(/^PS_(\d{2})\/(\d{2})\/(\d{2})(?:\s|\(|$)/);
+  if (ps) {
+    const dd = ps[1];
+    const mm = ps[2];
+    const yy2 = ps[3];
+    const y2 = parseInt(yy2, 10);
+    const y4 = y2 >= 70 ? `19${yy2}` : `20${yy2}`;
+    return `${y4}-${mm}-${dd}`;
+  }
+  const m = lbl.match(/(\d{2})\/(\d{2})\/(\d{4})/);
+  if (m) return `${m[3]}-${m[2]}-${m[1]}`;
+  const isoish = lbl.match(/(\d{4})-(\d{2})-(\d{2})/);
+  if (isoish) return `${isoish[1]}-${isoish[2]}-${isoish[3]}`;
+  return null;
+}
+
+function mmyyFromIso(iso) {
+  if (!iso || !/^\d{4}-\d{2}-\d{2}/.test(iso)) return "0000";
+  const [y, mo] = iso.split("-");
+  return `${mo.padStart(2, "0")}${String(y).slice(-2)}`;
+}
+
+function startEndMmyyFromItems(items) {
+  const isos = [...items.map(parseIsoFromGalleryItem).filter(Boolean)].sort();
+  if (!isos.length) {
+    const d = new Date();
+    const mm = String(d.getMonth() + 1).padStart(2, "0");
+    const yy = String(d.getFullYear()).slice(-2);
+    const fb = `${mm}${yy}`;
+    return { start: fb, end: fb };
+  }
+  return { start: mmyyFromIso(isos[0]), end: mmyyFromIso(isos[isos.length - 1]) };
+}
+
+function sanitizeExportProjectName(name) {
+  const s = String(name || "")
+    .replace(/[/\\?%*:|"<>]/g, "")
+    .trim();
+  return s || "Proyecto";
+}
+
+function buildGalleryJpegBasename({
+  mode,
+  galleryVisualMode,
+  pipelineVariant,
+  activeIndexKey,
+  s1PrepSigmaPol,
+  s1VvPalette,
+  items,
+  projectName,
+}) {
+  const { start, end } = startEndMmyyFromItems(items);
+  const proj = sanitizeExportProjectName(projectName);
+  const pv = pipelineVariant === "ps" ? "PS" : "S2";
+
+  if (mode === "view" && galleryVisualMode === "rgb") return `RGB_${pv}_${start}_${end} ${proj}`;
+  if (mode === "view" && galleryVisualMode === "index")
+    return `IDX_${String(activeIndexKey || "NDVI").toUpperCase()}_${pv}_${start}_${end} ${proj}`;
+  if (mode === "view" && galleryVisualMode === "s1-sar-index")
+    return `IDXSAR_${String(activeIndexKey || "RVI").toUpperCase()}_${start}_${end} ${proj}`;
+  if (mode === "view" && galleryVisualMode === "s1-vv") {
+    const pol = s1PrepSigmaPol === "vh" ? "VH" : "VV";
+    return `S1PREP_${pol}_${String(s1VvPalette || "spectral")}_${start}_${end} ${proj}`;
+  }
+  if (mode === "view" && galleryVisualMode === "s1-vh") return `S1GRD_VH_${start}_${end} ${proj}`;
+  if (mode === "view" && galleryVisualMode === "s1-index") return `S1GRD_VHVV_${start}_${end} ${proj}`;
+  return `GALERIA_${pv}_${start}_${end} ${proj}`;
+}
+
+async function exportGalleryMosaicJpeg({ items, basenameNoExt }) {
+  const GAP = 20;
+  const CAPTION_H = 28;
+  const images = [];
+  for (const it of items) {
+    try {
+      const im = await loadImageElement(it.src || "");
+      images.push({ img: im, label: it.label || "—" });
+    } catch {
+      images.push({ img: null, label: it.label || "—" });
+    }
+  }
+  let maxW = 1;
+  let maxH = 1;
+  for (const { img } of images) {
+    if (!img) continue;
+    const w = img.naturalWidth || img.width;
+    const h = img.naturalHeight || img.height;
+    maxW = Math.max(maxW, w);
+    maxH = Math.max(maxH, h);
+  }
+  const n = images.length;
+  const cols = Math.min(8, Math.max(2, Math.ceil(Math.sqrt(n))));
+  const rows = Math.ceil(n / cols) || 1;
+  const cellW = maxW + GAP;
+  const cellH = maxH + CAPTION_H + GAP;
+  const canvas = document.createElement("canvas");
+  canvas.width = cols * cellW + GAP;
+  canvas.height = rows * cellH + GAP;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("canvas");
+  ctx.fillStyle = "#fafafa";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.textAlign = "center";
+  images.forEach(({ img, label }, i) => {
+    const col = i % cols;
+    const row = Math.floor(i / cols);
+    const iw = img ? img.naturalWidth || img.width : 0;
+    const ih = img ? img.naturalHeight || img.height : 0;
+    const x0 = GAP + col * cellW + (maxW - iw) / 2;
+    const y0 = GAP + row * cellH;
+    if (img) {
+      ctx.drawImage(img, x0, y0, iw, ih);
+    } else {
+      ctx.fillStyle = "#e8e8e8";
+      ctx.fillRect(x0, y0, maxW, maxH);
+    }
+    ctx.fillStyle = "#222";
+    ctx.font = "600 12px system-ui,sans-serif";
+    const tx = GAP + col * cellW + maxW / 2;
+    const line = String(label).replace(/\s+/g, " ").trim();
+    const short = line.length > 44 ? `${line.slice(0, 42)}…` : line;
+    ctx.fillText(short, tx, y0 + maxH + 18);
+  });
+  const file = `${basenameNoExt}.jpg`;
+  const blob = await new Promise((res) => {
+    canvas.toBlob((b) => res(b), "image/jpeg", 0.98);
+  });
+  if (!blob) throw new Error("blob");
+  if (typeof window.showSaveFilePicker === "function") {
+    try {
+      const handle = await window.showSaveFilePicker({
+        suggestedName: file,
+        types: [{ description: "JPEG", accept: { "image/jpeg": [".jpg", ".jpeg"] } }],
+      });
+      const writable = await handle.createWritable();
+      await writable.write(blob);
+      await writable.close();
+      return;
+    } catch (e) {
+      if (e && e.name === "AbortError") return;
+    }
+  }
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = file.replace(/[/\\?%*:|"<>]/g, "_");
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
 /** Orden de índices en la galería (mismo que estimación). */
 const GALLERY_INDEX_KEYS = ["NDVI", "EVI", "NDWI", "CIre", "MCARI"];
 
@@ -286,6 +463,8 @@ export default function RgbTimeSeriesGallery({
   projectId,
   token,
   pipelineVariant = "s2",
+  /** Nombre del proyecto para nombre sugerido al exportar JPEG */
+  projectName = "",
 }) {
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -294,6 +473,9 @@ export default function RgbTimeSeriesGallery({
   const [selectedIds, setSelectedIds] = useState(() => new Set());
   const [activeIndexKey, setActiveIndexKey] = useState("NDVI");
   const [indexInfoKey, setIndexInfoKey] = useState(null);
+  /** null | clave de ayuda contextual (vista galería RGB / índices / S1). */
+  const [galleryHelpKey, setGalleryHelpKey] = useState(null);
+  const [exportBusy, setExportBusy] = useState(false);
   /** Paleta matplotlib para galería Visual VV (s1prepoceso Sigma0 dB). */
   const [s1VvPalette, setS1VvPalette] = useState("spectral");
   /** Sigma0 en s1prepoceso: VV → Sigma0_VV_db.img, VH → Sigma0_VH_db.img */
@@ -350,6 +532,10 @@ export default function RgbTimeSeriesGallery({
     if (open) setZoom(1);
     if (open && sceneCheckboxMode) setSelectedIds(new Set());
   }, [open, sceneCheckboxMode]);
+
+  useEffect(() => {
+    if (!open) setGalleryHelpKey(null);
+  }, [open]);
 
   useEffect(() => {
     if (!open) {
@@ -846,6 +1032,40 @@ export default function RgbTimeSeriesGallery({
     setZoom((z) => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z + delta)));
   }
 
+  const handleDownloadJpeg = useCallback(async () => {
+    if (!items.length) return;
+    setExportBusy(true);
+    try {
+      const basenameNoExt = buildGalleryJpegBasename({
+        mode,
+        galleryVisualMode,
+        pipelineVariant,
+        activeIndexKey,
+        s1PrepSigmaPol,
+        s1VvPalette,
+        items,
+        projectName,
+      });
+      await exportGalleryMosaicJpeg({ items, basenameNoExt });
+    } catch (e) {
+      console.error(e);
+      window.alert(
+        "No se pudo exportar el JPEG. Comprueba que las miniaturas hayan cargado. En algunos navegadores la descarga va a la carpeta de descargas con el nombre sugerido."
+      );
+    } finally {
+      setExportBusy(false);
+    }
+  }, [
+    items,
+    mode,
+    galleryVisualMode,
+    pipelineVariant,
+    activeIndexKey,
+    s1PrepSigmaPol,
+    s1VvPalette,
+    projectName,
+  ]);
+
   function stepActiveIndex(delta) {
     setActiveIndexKey((prev) => {
       const keys = indexGalleryKeys;
@@ -1038,41 +1258,14 @@ export default function RgbTimeSeriesGallery({
         Marca los <strong>índices</strong> (arriba) y las <strong>escenas</strong> (cada una corresponde a un GeoTIFF
         en <code>recortes/</code>). La estimación usa <strong>solo las escenas seleccionadas</strong>.
       </>
-    ) : showIndexSwitcher ? (
-    <>
-      Elige el índice abajo. Paleta <strong>RdYlGn</strong> (rojo = bajo, verde = alto) para{" "}
-      <strong>{labelIndexGalleryTab(galleryVisualMode, activeIndexKey)}</strong>. Una miniatura por fecha.{" "}
-      <span className="rgb-gallery-zoom-hint">
-        Zoom: se mantiene al cambiar de índice. Ctrl + rueda o barra. Flechas ← → entre índices.
-      </span>
-    </>
-  ) : mode === "view" && galleryVisualMode === "s1-index" ? (
-    <>
-      Cociente VH/VV en escala lineal (desde sigma0 dB del recorte GRD IW), normalizado y con paleta{" "}
-      <strong>RdYlGn</strong>. Banda 1 = VV, banda 2 = VH.{" "}
-      <span className="rgb-gallery-zoom-hint">Zoom: Ctrl + rueda o barra.</span>
-    </>
-  ) : mode === "view" && galleryVisualMode === "s1-vv" ? (
-    <>
-      En la barra: <strong>VV</strong> o <strong>VH</strong> elige <code>Sigma0_VV_db.img</code> /{" "}
-      <code>Sigma0_VH_db.img</code> bajo <code>s1prepoceso/</code>. Paleta matplotlib (Spectral, Jet o Turbo) y
-      etiqueta <code>dd/mm/aaaa</code> desde <code>…_S1A_IW_GRDH_1SDV_YYYYMMDD</code>…{" "}
-      <span className="rgb-gallery-zoom-hint">Zoom: Ctrl + rueda o barra.</span>
-    </>
-  ) : mode === "view" && galleryVisualMode === "s1-vh" ? (
-    <>
-      Amplitud (sigma0 en dB o lineal según el GeoTIFF) de la banda VH; estiramiento para visualización.{" "}
-      <span className="rgb-gallery-zoom-hint">Zoom: Ctrl + rueda o barra.</span>
-    </>
-  ) : (
-    <>
-      Recortes con vista color natural (orden cronológico). Etiqueta: <code>dd/mm/aaaa_clip</code> (desde la
-      fecha de la escena){" "}
-      <span className="rgb-gallery-zoom-hint">
-        Zoom: Ctrl + rueda, botones +/− o la barra. Arrastra las barras para desplazarte.
-      </span>
-    </>
-  );
+    ) : showIndexSwitcher ? null
+    : mode === "view" && galleryVisualMode === "s1-index"
+      ? null
+      : mode === "view" && galleryVisualMode === "s1-vv"
+        ? null
+        : mode === "view" && galleryVisualMode === "s1-vh"
+          ? null
+          : null;
 
   const emptyMsg =
     mode === "s1SarTimeSeriesSelect"
@@ -1102,17 +1295,98 @@ export default function RgbTimeSeriesGallery({
       ? indexCatalog.find((x) => x.id === indexInfoKey)
       : null;
 
+  const showViewGalleryInfoBtn =
+    mode === "view" &&
+    (galleryVisualMode === "rgb" ||
+      showIndexSwitcher ||
+      galleryVisualMode === "s1-index" ||
+      galleryVisualMode === "s1-vv" ||
+      galleryVisualMode === "s1-vh");
+
+  function openViewGalleryHelp() {
+    if (showIndexSwitcher) {
+      setGalleryHelpKey(galleryVisualMode === "s1-sar-index" ? "sarIdxTabs" : "idxTabs");
+    } else if (galleryVisualMode === "rgb") setGalleryHelpKey("rgb");
+    else if (galleryVisualMode === "s1-vv") setGalleryHelpKey("s1vv");
+    else if (galleryVisualMode === "s1-vh") setGalleryHelpKey("s1vh");
+    else if (galleryVisualMode === "s1-index") setGalleryHelpKey("s1grdIdx");
+  }
+
+  const headerZoomToolbar =
+    !loading && items.length > 0 ? (
+      <div className="rgb-gallery-header-toolbar" role="group" aria-label="Zoom y exportación">
+        <button
+          type="button"
+          className="rgb-gallery-zoom-btn"
+          onClick={() => adjustZoom(-ZOOM_STEP)}
+          disabled={zoom <= ZOOM_MIN + 1e-6}
+          aria-label="Alejar"
+        >
+          −
+        </button>
+        <input
+          type="range"
+          className="rgb-gallery-zoom-range rgb-gallery-zoom-range--header"
+          min={ZOOM_MIN * 100}
+          max={ZOOM_MAX * 100}
+          step={5}
+          value={Math.round(zoom * 100)}
+          onChange={(e) => setZoom(Number(e.target.value) / 100)}
+          aria-label="Nivel de zoom"
+        />
+        <button
+          type="button"
+          className="rgb-gallery-zoom-btn"
+          onClick={() => adjustZoom(ZOOM_STEP)}
+          disabled={zoom >= ZOOM_MAX - 1e-6}
+          aria-label="Acercar"
+        >
+          +
+        </button>
+        <span className="rgb-gallery-zoom-pct">{Math.round(zoom * 100)}%</span>
+        <button type="button" className="rgb-gallery-zoom-reset" onClick={() => setZoom(1)}>
+          Restablecer
+        </button>
+        <button
+          type="button"
+          className="rgb-gallery-download-btn"
+          onClick={() => void handleDownloadJpeg()}
+          disabled={exportBusy}
+          title="Mosaico JPEG a resolución nativa de las miniaturas (calidad 98 %). Nombre sugerido con rango de fechas."
+        >
+          {exportBusy ? "Exportando…" : "Descargar"}
+        </button>
+      </div>
+    ) : null;
+
   return (
     <div className="rgb-gallery-overlay" role="dialog" aria-modal="true" aria-label={title}>
       <div className="rgb-gallery-backdrop" onClick={onClose} aria-hidden="true" />
       <div className="rgb-gallery-window">
         <div className="rgb-gallery-header">
           <h2 className="rgb-gallery-title">{title}</h2>
-          <button type="button" className="rgb-gallery-close" onClick={onClose} aria-label="Cerrar">
-            ×
-          </button>
+          {headerZoomToolbar}
+          <div className="rgb-gallery-header-actions">
+            {showViewGalleryInfoBtn ? (
+              <button
+                type="button"
+                className="rgb-gallery-info-btn"
+                onClick={openViewGalleryHelp}
+                aria-label="Información sobre esta galería y controles"
+                title="Información"
+              >
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden>
+                  <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="2" />
+                  <path d="M12 16v-4M12 8h.01" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                </svg>
+              </button>
+            ) : null}
+            <button type="button" className="rgb-gallery-close" onClick={onClose} aria-label="Cerrar">
+              ×
+            </button>
+          </div>
         </div>
-        <p className="rgb-gallery-sub">{subtitle}</p>
+        {subtitle ? <p className="rgb-gallery-sub">{subtitle}</p> : null}
         {(mode === "indexSelect" || mode === "s1SarIndexSelect") && indexCatalog?.length ? (
           <div
             className="rgb-gallery-index-picker"
@@ -1198,82 +1472,51 @@ export default function RgbTimeSeriesGallery({
         )}
         {!loading && items.length > 0 && (
           <>
-            <div className="rgb-gallery-toolbar" aria-label="Controles de polarización, paleta y zoom">
-              {mode === "view" && galleryVisualMode === "s1-vv" ? (
-                <>
-                  <div className="rgb-gallery-s1-pol" role="group" aria-label="Polarización sigma0">
-                    <button
-                      type="button"
-                      className={
-                        s1PrepSigmaPol === "vv"
-                          ? "rgb-gallery-s1-pol-btn rgb-gallery-s1-pol-btn--active"
-                          : "rgb-gallery-s1-pol-btn"
-                      }
-                      onClick={() => setS1PrepSigmaPol("vv")}
-                    >
-                      VV
-                    </button>
-                    <button
-                      type="button"
-                      className={
-                        s1PrepSigmaPol === "vh"
-                          ? "rgb-gallery-s1-pol-btn rgb-gallery-s1-pol-btn--active"
-                          : "rgb-gallery-s1-pol-btn"
-                      }
-                      onClick={() => setS1PrepSigmaPol("vh")}
-                    >
-                      VH
-                    </button>
-                  </div>
-                  <div className="rgb-gallery-s1-palette-inline" role="group" aria-label="Paleta de color">
-                    <label className="rgb-gallery-s1-palette-inline-label">
-                      <span>Paleta (sigma0 dB)</span>
-                      <select
-                        className="rgb-gallery-s1-palette-select"
-                        value={s1VvPalette}
-                        onChange={(e) => setS1VvPalette(e.target.value)}
-                      >
-                        <option value="spectral">Spectral</option>
-                        <option value="jet">Jet</option>
-                        <option value="turbo">Turbo</option>
-                      </select>
-                    </label>
-                  </div>
-                </>
-              ) : null}
-              <button
-                type="button"
-                className="rgb-gallery-zoom-btn"
-                onClick={() => adjustZoom(-ZOOM_STEP)}
-                disabled={zoom <= ZOOM_MIN + 1e-6}
-                aria-label="Alejar"
+            {!loading && items.length > 0 && mode === "view" && galleryVisualMode === "s1-vv" ? (
+              <div
+                className="rgb-gallery-toolbar rgb-gallery-toolbar--s1-only"
+                aria-label="Polarización y paleta sigma0"
               >
-                −
-              </button>
-              <input
-                type="range"
-                className="rgb-gallery-zoom-range"
-                min={ZOOM_MIN * 100}
-                max={ZOOM_MAX * 100}
-                step={5}
-                value={Math.round(zoom * 100)}
-                onChange={(e) => setZoom(Number(e.target.value) / 100)}
-                aria-label="Nivel de zoom"
-              />
-              <button
-                type="button"
-                className="rgb-gallery-zoom-btn"
-                onClick={() => adjustZoom(ZOOM_STEP)}
-                disabled={zoom >= ZOOM_MAX - 1e-6}
-                aria-label="Acercar"
-              >
-                +
-              </button>
-              <span className="rgb-gallery-zoom-pct">{Math.round(zoom * 100)}%</span>
-              <button type="button" className="rgb-gallery-zoom-reset" onClick={() => setZoom(1)}>
-                Restablecer
-              </button>
-            </div>
+                <div className="rgb-gallery-s1-pol" role="group" aria-label="Polarización sigma0">
+                  <button
+                    type="button"
+                    className={
+                      s1PrepSigmaPol === "vv"
+                        ? "rgb-gallery-s1-pol-btn rgb-gallery-s1-pol-btn--active"
+                        : "rgb-gallery-s1-pol-btn"
+                    }
+                    onClick={() => setS1PrepSigmaPol("vv")}
+                  >
+                    VV
+                  </button>
+                  <button
+                    type="button"
+                    className={
+                      s1PrepSigmaPol === "vh"
+                        ? "rgb-gallery-s1-pol-btn rgb-gallery-s1-pol-btn--active"
+                        : "rgb-gallery-s1-pol-btn"
+                    }
+                    onClick={() => setS1PrepSigmaPol("vh")}
+                  >
+                    VH
+                  </button>
+                </div>
+                <div className="rgb-gallery-s1-palette-inline" role="group" aria-label="Paleta de color">
+                  <label className="rgb-gallery-s1-palette-inline-label">
+                    <span>Paleta (sigma0 dB)</span>
+                    <select
+                      className="rgb-gallery-s1-palette-select"
+                      value={s1VvPalette}
+                      onChange={(e) => setS1VvPalette(e.target.value)}
+                    >
+                      <option value="spectral">Spectral</option>
+                      <option value="jet">Jet</option>
+                      <option value="turbo">Turbo</option>
+                    </select>
+                  </label>
+                </div>
+              </div>
+            ) : null}
             {sceneCheckboxMode && (
               <div className="rgb-gallery-index-bar">
                 <span className="rgb-gallery-index-count">
@@ -1429,6 +1672,130 @@ export default function RgbTimeSeriesGallery({
               </button>
             </div>
             <p className="index-modal-body">{infoEntry.description}</p>
+          </div>
+        </div>
+      ) : null}
+      {galleryHelpKey ? (
+        <div
+          className="index-modal-overlay rgb-gallery-help-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="rgb-gallery-view-help-title"
+          onClick={() => setGalleryHelpKey(null)}
+        >
+          <div className="index-modal index-modal--gallery-help" onClick={(e) => e.stopPropagation()}>
+            <div className="index-modal-header">
+              <h3 id="rgb-gallery-view-help-title">
+                {galleryHelpKey === "rgb"
+                  ? "Visual RGB — serie temporal"
+                  : galleryHelpKey === "idxTabs"
+                    ? pipelineVariant === "ps"
+                      ? "Visual índices PlanetScope — serie temporal"
+                      : "Visual índices — serie temporal"
+                    : galleryHelpKey === "sarIdxTabs"
+                      ? "Visual índices SAR — serie temporal"
+                      : galleryHelpKey === "s1vv"
+                        ? "Visual VV/VH (sigma0) — serie temporal"
+                        : galleryHelpKey === "s1vh"
+                          ? "Visual VH — serie temporal"
+                          : "Visual índice S1 (VH/VV) — serie temporal"}
+              </h3>
+              <button
+                type="button"
+                className="index-modal-close"
+                onClick={() => setGalleryHelpKey(null)}
+                aria-label="Cerrar"
+              >
+                ×
+              </button>
+            </div>
+            <div className="index-modal-body rgb-gallery-help-body">
+              {galleryHelpKey === "rgb" ? (
+                <>
+                  <p>
+                    Recortes con vista color natural (orden cronológico). Etiqueta: <code>dd/mm/aaaa_clip</code>{" "}
+                    (desde la fecha de la escena).
+                  </p>
+                  <p>Zoom: Ctrl + rueda, botones +/− o la barra. Arrastra las barras para desplazarte.</p>
+                  <p>
+                    <strong>Descargar:</strong> genera un mosaico JPEG con cada miniatura a su resolución nativa
+                    (calidad 98 %). Si el navegador lo permite, podrás elegir carpeta y nombre; el nombre sugerido
+                    incluye mes/año de inicio y fin y el proyecto.
+                  </p>
+                </>
+              ) : null}
+              {galleryHelpKey === "idxTabs" ? (
+                <>
+                  <p>
+                    Elige el índice abajo. Paleta <strong>RdYlGn</strong> (rojo = bajo, verde = alto) para{" "}
+                    <strong>{labelIndexGalleryTab(galleryVisualMode, activeIndexKey)}</strong>. Una miniatura por
+                    fecha.
+                  </p>
+                  <p>
+                    Zoom: se mantiene al cambiar de índice. <strong>Ctrl + rueda</strong> o la barra. Flechas{" "}
+                    <strong>← →</strong> entre índices. Arrastra las barras de desplazamiento para moverte por la
+                    cuadrícula.
+                  </p>
+                  <p>
+                    <strong>Descargar:</strong> mosaico JPEG a resolución nativa de las miniaturas del índice activo.
+                  </p>
+                </>
+              ) : null}
+              {galleryHelpKey === "sarIdxTabs" ? (
+                <>
+                  <p>
+                    Elige el índice SAR abajo. Paleta <strong>RdYlGn</strong> para{" "}
+                    <strong>{labelS1SarIndexTab(activeIndexKey)}</strong>. Una miniatura por fecha.
+                  </p>
+                  <p>
+                    Zoom: se mantiene al cambiar de índice. <strong>Ctrl + rueda</strong> o la barra. Flechas{" "}
+                    <strong>← →</strong> entre índices.
+                  </p>
+                  <p>
+                    <strong>Descargar:</strong> mosaico JPEG a resolución nativa de las miniaturas del índice SAR
+                    activo.
+                  </p>
+                </>
+              ) : null}
+              {galleryHelpKey === "s1vv" ? (
+                <>
+                  <p>
+                    En la barra inferior: <strong>VV</strong> o <strong>VH</strong> elige{" "}
+                    <code>Sigma0_VV_db.img</code> / <code>Sigma0_VH_db.img</code> bajo <code>s1prepoceso/</code>.
+                    Paleta matplotlib (Spectral, Jet o Turbo) y etiqueta <code>dd/mm/aaaa</code> desde{" "}
+                    <code>…_S1A_IW_GRDH_1SDV_YYYYMMDD</code>…
+                  </p>
+                  <p>Zoom: Ctrl + rueda, botones +/− o la barra. Arrastra las barras para desplazarte.</p>
+                  <p>
+                    <strong>Descargar:</strong> mosaico JPEG con la polarización y paleta actuales.
+                  </p>
+                </>
+              ) : null}
+              {galleryHelpKey === "s1vh" ? (
+                <>
+                  <p>
+                    Amplitud (sigma0 en dB o lineal según el GeoTIFF) de la banda VH; estiramiento para
+                    visualización.
+                  </p>
+                  <p>Zoom: Ctrl + rueda, botones +/− o la barra. Arrastra las barras para desplazarte.</p>
+                  <p>
+                    <strong>Descargar:</strong> mosaico JPEG a resolución nativa de las miniaturas.
+                  </p>
+                </>
+              ) : null}
+              {galleryHelpKey === "s1grdIdx" ? (
+                <>
+                  <p>
+                    Cociente VH/VV en escala lineal (desde sigma0 dB del recorte GRD IW), normalizado y con paleta{" "}
+                    <strong>RdYlGn</strong>. Banda 1 = VV, banda 2 = VH.
+                  </p>
+                  <p>Zoom: Ctrl + rueda, botones +/− o la barra. Arrastra las barras para desplazarte.</p>
+                  <p>
+                    <strong>Descargar:</strong> mosaico JPEG a resolución nativa de las miniaturas.
+                  </p>
+                </>
+              ) : null}
+            </div>
           </div>
         </div>
       ) : null}

@@ -59,6 +59,16 @@ class StudyOrder(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
+class ProjectShare(Base):
+    """Acceso de lectura de un cliente a un proyecto de otro usuario (mismo tenant)."""
+    __tablename__ = "project_shares"
+    id = Column(Integer, primary_key=True, index=True)
+    project_id = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    granted_by_user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 class Project(Base):
     __tablename__ = "projects"
     id = Column(Integer, primary_key=True, index=True)
